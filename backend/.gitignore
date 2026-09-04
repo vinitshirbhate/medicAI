@@ -3,3 +3,4 @@ __pycache__/
 *.py[cod]
 sundara.db
 governance_service/*.db
+resource_service/*.db

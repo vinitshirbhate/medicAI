@@ -76,3 +76,55 @@ class AuditEntry(BaseModel):
     payload: dict[str, Any]
     previous_hash: str
     hash: str
+
+
+class BedCapacity(BaseModel):
+    total: int = Field(ge=0)
+    occupied: int = Field(ge=0)
+    available: int = Field(ge=0)
+
+
+class StaffAvailability(BaseModel):
+    scheduled: int = Field(ge=0)
+    available: int = Field(ge=0)
+
+
+class HospitalResource(BaseModel):
+    hospital_id: str = Field(min_length=1, max_length=128)
+    icu: BedCapacity
+    ed: BedCapacity
+    doctors: StaffAvailability
+    nurses: StaffAvailability
+
+
+class NetworkEvent(BaseModel):
+    event_id: str = Field(default_factory=lambda: str(uuid4()))
+    type: Literal["OUTBREAK", "MASS_CASUALTY", "TRANSIT_DISRUPTION", "OTHER"]
+    severity: Literal["LOW", "MODERATE", "HIGH", "CRITICAL"]
+    details: dict[str, Any] = Field(default_factory=dict)
+    occurred_at: datetime = Field(default_factory=utc_now)
+    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+
+
+class ResourceState(BaseModel):
+    network_icu_occupancy_pct: int = Field(ge=0, le=100)
+    active_events: list[NetworkEvent]
+    hospitals: list[HospitalResource]
+    infeasibilities: list[dict[str, str]] = Field(default_factory=list)
+    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+
+
+class ResourceRecommendationRequest(AssessmentReference):
+    hospital_id: str = Field(min_length=1, max_length=128)
+    deterioration_risk: float = Field(ge=0, le=1)
+    time_sensitivity: Literal["HIGH", "MODERATE"]
+    recommended_action: str = Field(default="", max_length=500)
+
+
+class ResourceRecommendation(AssessmentReference):
+    preferred: str
+    constraint: str | None = None
+    alternative: str | None = None
+    network_option: str | None = None
+    transport_feasible: bool | None = None
+    generated_at: datetime = Field(default_factory=utc_now)
