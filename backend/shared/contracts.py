@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 SCHEMA_VERSION = "1.0"
 
@@ -76,3 +76,125 @@ class AuditEntry(BaseModel):
     payload: dict[str, Any]
     previous_hash: str
     hash: str
+
+
+class BedCapacity(BaseModel):
+    total: int = Field(ge=0)
+    occupied: int = Field(ge=0)
+    available: int = Field(ge=0)
+
+
+class StaffAvailability(BaseModel):
+    scheduled: int = Field(ge=0)
+    available: int = Field(ge=0)
+
+
+class HospitalResource(BaseModel):
+    hospital_id: str = Field(min_length=1, max_length=128)
+    icu: BedCapacity
+    ed: BedCapacity
+    doctors: StaffAvailability
+    nurses: StaffAvailability
+
+
+class NetworkEvent(BaseModel):
+    event_id: str = Field(default_factory=lambda: str(uuid4()))
+    type: Literal["OUTBREAK", "MASS_CASUALTY", "TRANSIT_DISRUPTION", "OTHER"]
+    severity: Literal["LOW", "MODERATE", "HIGH", "CRITICAL"]
+    details: dict[str, Any] = Field(default_factory=dict)
+    occurred_at: datetime = Field(default_factory=utc_now)
+    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+
+
+class ResourceState(BaseModel):
+    network_icu_occupancy_pct: int = Field(ge=0, le=100)
+    active_events: list[NetworkEvent]
+    hospitals: list[HospitalResource]
+    infeasibilities: list[dict[str, str]] = Field(default_factory=list)
+    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+
+
+class ResourceRecommendationRequest(AssessmentReference):
+    hospital_id: str = Field(min_length=1, max_length=128)
+    deterioration_risk: float = Field(ge=0, le=1)
+    time_sensitivity: Literal["HIGH", "MODERATE"]
+    recommended_action: str = Field(default="", max_length=500)
+
+
+class ResourceRecommendation(AssessmentReference):
+    preferred: str
+    constraint: str | None = None
+    alternative: str | None = None
+    network_option: str | None = None
+    transport_feasible: bool | None = None
+    generated_at: datetime = Field(default_factory=utc_now)
+
+
+class VitalsObservation(BaseModel):
+    """One immutable clinical-vital observation at a known point in time."""
+
+    observation_id: str = Field(default_factory=lambda: str(uuid4()))
+    patient_id: str = Field(min_length=1, max_length=64)
+    encounter_id: str | None = Field(default=None, max_length=128)
+    observed_at: datetime = Field(default_factory=utc_now)
+    source: Literal["MONITOR", "MANUAL", "SIMULATED_EHR"]
+    source_event_id: str | None = Field(default=None, max_length=128)
+    heart_rate: float | None = Field(default=None, gt=0, le=300)
+    systolic_bp: float | None = Field(default=None, gt=0, le=300)
+    diastolic_bp: float | None = Field(default=None, gt=0, le=200)
+    spo2: float | None = Field(default=None, ge=0, le=100)
+    respiratory_rate: float | None = Field(default=None, gt=0, le=100)
+    temperature_c: float | None = Field(default=None, ge=25, le=45)
+    gcs: float | None = Field(default=None, ge=3, le=15)
+    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+
+    @model_validator(mode="after")
+    def includes_measurement(self) -> "VitalsObservation":
+        metric_names = (
+            "heart_rate", "systolic_bp", "diastolic_bp", "spo2",
+            "respiratory_rate", "temperature_c", "gcs",
+        )
+        if not any(getattr(self, name) is not None for name in metric_names):
+            raise ValueError("at least one vital measurement is required")
+        return self
+
+
+class LabObservation(BaseModel):
+    """One immutable laboratory measurement used for a time-series trend."""
+
+    observation_id: str = Field(default_factory=lambda: str(uuid4()))
+    patient_id: str = Field(min_length=1, max_length=64)
+    encounter_id: str | None = Field(default=None, max_length=128)
+    observed_at: datetime = Field(default_factory=utc_now)
+    test_code: str = Field(min_length=1, max_length=128)
+    value: float
+    unit: str = Field(min_length=1, max_length=64)
+    source: Literal["LABORATORY_SYSTEM", "MANUAL", "SIMULATED_EHR"]
+    source_event_id: str | None = Field(default=None, max_length=128)
+    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+
+
+class TrendMetric(BaseModel):
+    latest: float | None
+    first: float | None
+    minimum: float | None
+    maximum: float | None
+    change: float | None
+    slope_per_hour: float | None
+    observations: int
+
+
+class TrendQuality(BaseModel):
+    observation_count: int
+    latest_age_seconds: float | None
+    missing_latest_metrics: list[str]
+    metrics_with_baseline: list[str]
+
+
+class TrendFeatures(BaseModel):
+    patient_id: str
+    window_minutes: int
+    calculated_at: datetime = Field(default_factory=utc_now)
+    metrics: dict[str, TrendMetric]
+    quality: TrendQuality
+    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
