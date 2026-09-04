@@ -4,3 +4,4 @@ __pycache__/
 sundara.db
 governance_service/*.db
 resource_service/*.db
+time_series_service/.env
