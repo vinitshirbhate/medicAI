@@ -7,9 +7,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+from intake_extraction import extract_intake
+from voice_intake import load_model, model_status, transcribe, transcribe_segment
 
 DB = Path(os.getenv("SUNDARA_DB_PATH", Path(__file__).with_name("sundara.db")))
 MODEL_VERSION = "sundara-triage-demo-0.1.0"
@@ -29,7 +32,10 @@ class Value(BaseModel):
 
 class Vitals(BaseModel):
     observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    source: Literal["MONITOR", "MANUAL", "SIMULATED_EHR"] = "MANUAL"
+    source: Literal["MONITOR", "MANUAL", "SIMULATED_EHR", "NURSE_REPORTED_PRIOR"] = "MANUAL"
+    # A value spoken as "falling from 96 to 89" has no stated time. Only its order is trusted:
+    # nothing in scoring reads the interval, and the estimated stamp is carried into the audit log.
+    observed_at_estimated: bool = False
     heart_rate: Value = Field(default_factory=Value)
     systolic_bp: Value = Field(default_factory=Value)
     diastolic_bp: Value = Field(default_factory=Value)
@@ -59,7 +65,7 @@ class Patient(BaseModel):
     age: int = Field(ge=0, le=130)
     sex: Literal["F", "M", "OTHER", "UNKNOWN"] = "UNKNOWN"
     arrival_time: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    arrival_mode: Literal["AMBULANCE", "WALK_IN", "TRANSFER"] = "WALK_IN"
+    arrival_mode: Literal["AMBULANCE", "WALK_IN", "TRANSFER", "UNKNOWN"] = "WALK_IN"
     is_new_patient: bool = False
     chief_complaint: str = ""
     pathway: Literal["DENGUE", "BURN_SMOKE", "TRAUMA", "GENERAL"] = "GENERAL"
@@ -95,8 +101,47 @@ def audit(event_type: str, initiated_by: str, actor: str, patient_id: str | None
     return {**entry, "seq": cursor.lastrowid, "hash": h}
 
 def vitals_for(patient_id: str) -> list[dict[str, Any]]:
-    with conn() as c: rows = c.execute("SELECT payload FROM vitals WHERE patient_id=? ORDER BY id", (patient_id,)).fetchall()
-    return [json.loads(row["payload"]) for row in rows]
+    with conn() as c: rows = c.execute("SELECT id,payload FROM vitals WHERE patient_id=? ORDER BY id", (patient_id,)).fetchall()
+    series = [(row["id"], json.loads(row["payload"])) for row in rows]
+    series.sort(key=lambda item: (datetime.fromisoformat(item[1]["observed_at"]), not item[1].get("observed_at_estimated", False), item[0]))
+    return [payload for _, payload in series]
+
+# NEWS2 bands (RCP). Used here for the trajectory signal and as the named degraded-mode fallback.
+NEWS2_BANDS = {
+    "respiratory_rate": ((8, 3), (11, 1), (20, 0), (24, 2), (float("inf"), 3)),
+    "spo2": ((91, 3), (93, 2), (95, 1), (float("inf"), 0)),
+    "systolic_bp": ((90, 3), (100, 2), (110, 1), (219, 0), (float("inf"), 3)),
+    "heart_rate": ((40, 3), (50, 1), (90, 0), (110, 1), (130, 2), (float("inf"), 3)),
+    "temperature_c": ((35.0, 3), (36.0, 1), (38.0, 0), (39.0, 1), (float("inf"), 2)),
+}
+# A rise of this much across the observed series is treated as deterioration. Sundara's own choice,
+# informed by NEWS2 parameters rather than taken from them: research item R-07 must confirm it.
+NEWS2_RISE_POINTS = 2
+
+def news2_points(v: dict[str, Any], names: set[str]) -> int:
+    total = 0
+    for name in names:
+        value = v[name]["value"]
+        total += (3 if value < 15 else 0) if name == "gcs" else next(points for edge, points in NEWS2_BANDS[name] if value <= edge)
+    return total  # NEWS2 scores any consciousness state other than alert as 3; GCS < 15 stands in.
+
+def news2_measured(v: dict[str, Any]) -> set[str]:
+    return {name for name in (*NEWS2_BANDS, "gcs") if v.get(name, {}).get("value") is not None}
+
+def news2_aggregate(v: dict[str, Any]) -> int | None:
+    """Partial NEWS2 over the parameters this demo records. None when nothing was measured."""
+    measured = news2_measured(v)
+    return news2_points(v, measured) if measured else None
+
+def news2_pair(earlier: dict[str, Any], later: dict[str, Any]) -> tuple[int | None, int | None]:
+    """Score both observations over the parameters measured in both.
+
+    A nurse-reported prior reading carries only the vitals that were spoken. Scoring it against a
+    fuller current row would make the aggregate rise from missingness rather than from deterioration.
+    """
+    shared = news2_measured(earlier) & news2_measured(later)
+    if not shared: return None, None
+    return news2_points(earlier, shared), news2_points(later, shared)
 
 def quality(p: dict[str, Any], v: dict[str, Any]) -> tuple[float, dict[str, float], list[str]]:
     values = [value for key, value in v.items() if isinstance(value, dict)]
@@ -112,7 +157,7 @@ def resources(p: dict[str, Any], risk: float) -> dict[str, Any]:
     return {"preferred": "ICU transfer", "constraint": "No ICU bed available at this hospital", "alternative": "High-acuity stabilization bay", "network_option": "SUNDARA_NORTH has 1 available ICU bed", "transport_feasible": True}
 
 def calculate(p: dict[str, Any]) -> dict[str, Any]:
-    v = vitals_for(p["patient_id"])[-1]; d = p["pathway_detail"]; risk = .12; contributions = []
+    series = vitals_for(p["patient_id"]); v = series[-1]; d = p["pathway_detail"]; risk = .12; contributions = []
     def add(condition: bool, points: float, feature: str, label: str) -> None:
         nonlocal risk
         if condition: risk += points; contributions.append({"feature": feature, "clinical_label": label, "contribution": points})
@@ -120,18 +165,23 @@ def calculate(p: dict[str, Any]) -> dict[str, Any]:
     add(spo2 is not None and spo2 < 92, .24, f"SpO2 {spo2}%", "Oxygen saturation low")
     add(hr is not None and hr >= 120, .16, f"HR {hr}", "Heart rate elevated")
     add(rr is not None and rr >= 28, .13, f"RR {rr}", "Respiratory rate elevated")
-    trend = d.get("platelet_trend", [])
+    first, last = news2_pair(series[0], v) if len(series) > 1 else (None, None)
+    rose = first is not None and last is not None and last - first >= NEWS2_RISE_POINTS
+    add(rose, .18, f"NEWS2 {first} to {last}", f"Vital signs deteriorating across observations (NEWS2 {first} to {last})")
+    trend = d.get("platelet_trend") or []  # A voice draft carries explicit nulls, not absent keys.
     add(len(trend) >= 2 and trend[-1] < trend[0] * .8, .15, "platelets falling", "Platelet count falling")
     add(d.get("airway_concern") == "HIGH", .24, "high airway concern", "Progressive airway risk")
     add(bool(d.get("smoke_inhalation")), .10, "smoke inhalation", "Smoke inhalation exposure")
-    add(d.get("tbsa_pct", 0) >= 20, .16, f"TBSA {d.get('tbsa_pct')}%", "Large burn area")
+    add((d.get("tbsa_pct") or 0) >= 20, .16, f"TBSA {d.get('tbsa_pct')}%", "Large burn area")
+    # Strongest driver first, so the one-line explanation names what actually moved the score.
+    contributions.sort(key=lambda item: item["contribution"], reverse=True)
     risk = round(min(risk, .98), 2); complete, breakdown, missing = quality(p, v)
     ensemble = [max(.01, min(.99, risk + shift)) for shift in (-.025, .015, -.01, .02, 0)]
     spread = round(max(ensemble) - min(ensemble), 3); ood = p["age"] < 16 and p["pathway"] == "BURN_SMOKE"
     reliability = round(max(.2, min(.98, .94 - spread * 2.5 - (1 - complete) * .45 - (.18 if ood else 0))), 2)
     low = reliability < CONFIDENCE_THRESHOLD
     escalation = {"to_band": p["protocol_band"] - 1, "status": "AWAITING_CONFIRMATION", "evidence": [x["clinical_label"] for x in contributions[:3]]} if risk >= .8 and reliability >= .8 and p["protocol_band"] > 1 else None
-    return {"patient_id": p["patient_id"], "assessed_at": now(), "initiated_by": "AI", "model_version": MODEL_VERSION, "protocol_band": p["protocol_band"], "deterioration_risk": risk, "prediction_reliability": reliability, "data_completeness": complete, "completeness_breakdown": breakdown, "time_sensitivity": "HIGH" if risk >= .65 else "MODERATE", "forecast": {"horizon_hours": 2, "trajectory": ["MODERATE", "HIGH", "CRITICAL"] if risk >= .7 else ["LOW", "MODERATE", "HIGH"], "probability": risk}, "explanation": {"one_line": "; ".join(x["clinical_label"] for x in contributions[:3]) or "No high-risk feature identified.", "contributions": contributions}, "uncertainty": {"is_low_confidence": low, "reasons": missing if low else [], "ood_flag": ood, "ensemble_spread": spread}, "proposed_escalation": escalation, "recommended_action": {"primary": "Priority clinical reassessment" if low else "Immediate clinician assessment" if risk >= .65 else "Clinical assessment when available", "preparation": ["Continuous SpO2 monitoring", "Repeat CBC"] if risk >= .65 else [], "verb": "SUGGESTED"}, "prefilled_override": {"reason_code": "BEDSIDE_ASSESSMENT_DIFFERS", "reason_text": "System uncertainty: " + "; ".join(missing), "reassessment_minutes": 10} if low else None, "resource_recommendation": resources(p, risk)}
+    return {"patient_id": p["patient_id"], "assessed_at": now(), "initiated_by": "AI", "model_version": MODEL_VERSION, "protocol_band": p["protocol_band"], "deterioration_risk": risk, "prediction_reliability": reliability, "data_completeness": complete, "completeness_breakdown": breakdown, "time_sensitivity": "HIGH" if risk >= .65 else "MODERATE", "forecast": {"horizon_hours": 2, "trajectory": ["MODERATE", "HIGH", "CRITICAL"] if risk >= .7 else ["LOW", "MODERATE", "HIGH"], "probability": risk}, "explanation": {"one_line": "; ".join(x["clinical_label"] for x in contributions[:3]) or "No high-risk feature identified.", "contributions": contributions}, "observations_used": len(series), "news2": {"first": first, "latest": last, "rise_points": NEWS2_RISE_POINTS}, "uncertainty": {"is_low_confidence": low, "reasons": missing if low else [], "ood_flag": ood, "ensemble_spread": spread}, "proposed_escalation": escalation, "recommended_action": {"primary": "Priority clinical reassessment" if low else "Immediate clinician assessment" if risk >= .65 else "Clinical assessment when available", "preparation": ["Continuous SpO2 monitoring", "Repeat CBC"] if risk >= .65 else [], "verb": "SUGGESTED"}, "prefilled_override": {"reason_code": "BEDSIDE_ASSESSMENT_DIFFERS", "reason_text": "System uncertainty: " + "; ".join(missing), "reassessment_minutes": 10} if low else None, "resource_recommendation": resources(p, risk)}
 
 def save_assessment(p: dict[str, Any]) -> dict[str, Any]:
     a = calculate(p)
@@ -195,6 +245,46 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000","http:
 
 @app.get("/health")
 def health() -> dict[str,str]: return {"status":"ok","mode":"synthetic-demo-only"}
+@app.get("/api/v1/voice/model-status")
+def voice_model_status() -> dict[str,Any]: return model_status()
+@app.post("/api/v1/voice/warmup")
+async def voice_warmup() -> dict[str,Any]:
+    """Load Whisper before recording starts so the first live segment is not the one that waits."""
+    try:
+        await asyncio.to_thread(load_model)
+    except Exception as error:
+        raise HTTPException(503, "Local Whisper model could not be loaded. Check dependencies and the model cache.") from error
+    return model_status()
+@app.post("/api/v1/voice/extract-text")
+def extract_from_text(transcript: str) -> dict[str,Any]:
+    """Development/review endpoint for checking the conservative extraction contract."""
+    return extract_intake(transcript)
+@app.post("/api/v1/voice/transcribe")
+async def transcribe_nurse_handoff(audio: UploadFile = File(...)) -> dict[str,Any]:
+    """Transcribe an audio handoff locally and return a nurse-reviewable intake draft."""
+    if audio.content_type and not audio.content_type.startswith("audio/"):
+        raise HTTPException(415, "Upload an audio file (for example WAV, MP3, or FLAC).")
+    content = await audio.read()
+    if not content: raise HTTPException(422, "Audio file is empty.")
+    if len(content) > 25 * 1024 * 1024: raise HTTPException(413, "Audio file exceeds the 25 MB demo limit.")
+    try:
+        transcript = await asyncio.to_thread(transcribe, content)
+    except Exception as error:
+        raise HTTPException(503, "Local Whisper transcription unavailable. Confirm dependencies, audio decoding support, and the model cache.") from error
+    return {**extract_intake(transcript), "audio_filename": audio.filename, "transcription_model": "openai/whisper-small"}
+@app.post("/api/v1/voice/transcribe-segment")
+async def transcribe_voice_segment(audio: UploadFile = File(...)) -> dict[str,str]:
+    """Short streaming-style chunk for the live transcript; no clinical extraction occurs here."""
+    if audio.content_type and not audio.content_type.startswith("audio/"):
+        raise HTTPException(415, "Upload an audio file.")
+    content = await audio.read()
+    if not content: raise HTTPException(422, "Audio segment is empty.")
+    if len(content) > 10 * 1024 * 1024: raise HTTPException(413, "Audio segment exceeds 10 MB.")
+    try:
+        transcript = await asyncio.to_thread(transcribe_segment, content)
+    except Exception as error:
+        raise HTTPException(503, "Local Whisper segment transcription unavailable.") from error
+    return {"transcript": transcript}
 @app.get("/api/v1/queue")
 def get_queue() -> dict[str,Any]: return {"updated_at":now(),"ranking_policy":"protocol band, then risk, time sensitivity, wait equity; reliability gates only","patients":queue()}
 @app.post("/api/v1/patients",status_code=201)
@@ -246,3 +336,6 @@ async def queue_socket(socket:WebSocket)->None:
     try:
         while True: await socket.receive_text()
     except WebSocketDisconnect: hub.clients.discard(socket)
+
+# Keep the voice-console static client separate from API code, but serve both with one command.
+app.mount("/", StaticFiles(directory=Path(__file__).parent.parent / "frontend", html=True), name="voice-console")

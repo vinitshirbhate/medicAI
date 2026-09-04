@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sundara Command | Voice Intake</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div>
+          <p class="eyebrow">SUNDARA COMMAND / TRIAGE SERVICE</p>
+          <h1>Voice Intake Console</h1>
+          <p class="subtle">Local Whisper transcription · nurse review required before triage</p>
+        </div>
+        <span id="connection" class="status">Checking backend…</span>
+      </header>
+
+      <section class="recorder-card">
+        <div id="pulse" class="mic-icon">●</div>
+        <div>
+          <h2 id="recording-title">Ready for nurse handoff</h2>
+          <p id="recording-status">Press Start, speak clearly, then stop to transcribe locally.</p>
+        </div>
+        <div class="controls">
+          <button id="record" class="primary">Start speaking</button>
+          <button id="stop" class="secondary" disabled>Stop &amp; extract</button>
+        </div>
+      </section>
+
+      <section id="live-panel" class="live-panel" hidden>
+        <p class="label">LIVE TRANSCRIPT <span id="live-state">listening</span></p>
+        <p id="live-transcript">Listening for the first speech segment…</p>
+      </section>
+
+      <p id="error" class="error" hidden></p>
+
+      <section id="empty" class="empty-state">
+        <p>Example handoff: “New patient, ID P-1042. Forty-six-year-old female, arrived by ambulance…”</p>
+        <small>The app sends the recording to your local FastAPI service at <code>127.0.0.1:8000</code>. No patient is created from voice input.</small>
+      </section>
+
+      <section id="result" hidden>
+        <div class="alert">Review required — spoken fields are drafts. Confirm all values before clinical use.</div>
+        <div class="grid">
+          <article class="card transcript-card">
+            <p class="label">WHISPER TRANSCRIPT</p>
+            <p id="transcript"></p>
+          </article>
+          <article class="card">
+            <p class="label">PATIENT DRAFT</p>
+            <dl id="patient"></dl>
+          </article>
+          <article class="card vitals-card">
+            <p class="label">EXTRACTED VITALS</p>
+            <dl id="vitals"></dl>
+          </article>
+          <article class="card">
+            <p class="label">PATHWAY EVIDENCE</p>
+            <dl id="pathway"></dl>
+          </article>
+        </div>
+        <article class="card warning-card">
+          <p class="label">NEEDS CONFIRMATION</p>
+          <ul id="missing"></ul>
+        </article>
+
+        <article class="card confirm-card">
+          <p class="label">NURSE CONFIRMATION</p>
+          <p class="subtle">Voice intake cannot assign a protocol band. Confirm the identifiers and set the band to create the record.</p>
+          <p id="prior-note" class="prior-note" hidden></p>
+          <div class="confirm-grid">
+            <label>Patient ID<input id="c-id" type="text" autocomplete="off" /></label>
+            <label>Age<input id="c-age" type="number" min="0" max="130" /></label>
+            <label>Pathway<select id="c-pathway"></select></label>
+            <label>Protocol band<select id="c-band">
+              <option value="">Nurse must select</option>
+              <option value="1">1 - Immediate</option>
+              <option value="2">2 - Very urgent</option>
+              <option value="3">3 - Urgent</option>
+              <option value="4">4 - Standard</option>
+              <option value="5">5 - Non-urgent</option>
+            </select></label>
+          </div>
+          <button id="create" class="primary" disabled>Create record</button>
+          <p id="create-result" class="create-result" hidden></p>
+        </article>
+      </section>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -58,6 +58,255 @@ The **working demo is the most important component**, so the MVP should be desig
 # Proposed Product
 
 ## SUNDARA COMMAND
+## Technical Refinement: Risk vs Prediction Reliability
+
+### 1. Do not treat risk probability and reliability as the same quantity
+
+**Deterioration Risk** is a model-estimated probability for a defined outcome over a defined prediction horizon. It is not the same statistical quantity as confidence/reliability.
+
+Therefore the UI should **not** present arbitrary paired numbers such as:
+
+```text
+Deterioration Risk: 87%
+Confidence: 94%
+```
+
+Instead:
+
+```text
+Deterioration Risk       87%
+Prediction Reliability   HIGH
+Data Completeness        91%
+Uncertainty              LOW
+```
+
+For an unfamiliar or incomplete case:
+
+```text
+Deterioration Risk       84%
+Prediction Reliability   LOW ⚠
+Data Completeness        43%
+Uncertainty              HIGH
+```
+
+**Prediction Reliability is not a second AI probability.** It is a qualitative assessment derived from evidence quality and model uncertainty.
+
+This is consistent with the role of clinician-facing clinical decision support: the system should provide useful risk information to inform care rather than imply that an algorithm has independently made the clinical decision. AHRQ's current ED research specifically emphasizes ML-based triage as clinician-facing decision support and evaluates safety, usability, equity, and real-world impact. citeturn0search1turn0search11
+
+### 2. Uncertainty is a combination of signals
+
+Do not use model disagreement alone and call it "confidence."
+
+```text
+                  ┌── Data completeness
+                  │
+                  ├── Missingness
+                  │
+                  ├── Prediction calibration
+                  │
+                  ├── Model disagreement
+                  │
+                  └── OOD / unfamiliarity
+                           │
+                           ▼
+                    UNCERTAINTY ENGINE
+                           │
+                           ▼
+                 PREDICTION RELIABILITY
+```
+
+A deep ensemble can provide a useful **model-disagreement signal**, but that signal is only one input to the Uncertainty Engine.
+
+The system therefore distinguishes:
+
+- **Deterioration Risk:** what the model estimates may happen.
+- **Uncertainty:** how ambiguous or unstable the prediction is.
+- **Prediction Reliability:** clinician-friendly summary of the reliability of the prediction.
+- **Data Completeness:** how much expected information is currently available.
+
+### 3. Reliability must not directly reduce clinical priority
+
+This is a critical fairness and safety rule.
+
+Clinical priority should be based on:
+
+```text
+Clinical Priority
+      ↑
+Acuity
+Deterioration Risk
+Trajectory
+Time Sensitivity
+Clinical Rules
+Waiting-Time Escalation
+```
+
+Prediction reliability is handled separately:
+
+```text
+Prediction Reliability
+      ↑
+Data Completeness
+Missingness
+Calibration
+Model Disagreement
+OOD / Familiarity
+```
+
+If a patient is clinically critical but has incomplete information:
+
+```text
+Clinical Priority: CRITICAL
+Prediction Reliability: LOW ⚠
+```
+
+the system must **not downgrade that patient**.
+
+Instead:
+
+```text
+→ Maintain clinical priority
+→ Escalate human reassessment
+→ Acquire the most decision-relevant missing information
+```
+
+This avoids the unsafe logic:
+
+> "The less we know about a patient, the less urgent they become."
+
+### 4. Equal clinical severity requires a transparent tie-breaker
+
+If two patients are clinically equivalent, database presence must **never** decide who receives priority.
+
+For example:
+
+```text
+Patient A — Existing record
+Clinical Priority: CRITICAL
+Deterioration Risk: 91%
+Prediction Reliability: HIGH
+
+Patient B — New patient
+Clinical Priority: CRITICAL
+Deterioration Risk: 91%
+Prediction Reliability: LOW
+```
+
+The new patient's lower reliability does not make them less critical.
+
+If there is no clinically meaningful difference, use an explicit operational tie-breaker such as:
+
+```text
+1. Clinical urgency / time sensitivity
+2. Waiting-time escalation
+3. Arrival order where clinically appropriate
+4. Randomized tie-break where genuinely indistinguishable
+```
+
+The rule must be visible and auditable. The database status is not a clinical feature.
+
+### 5. The Clinical Decision Engine is the centerpiece
+
+The system is not:
+
+```text
+AI → decision
+```
+
+It is:
+
+```text
+AI predictions
+      +
+Clinical rules
+      +
+Uncertainty / prediction reliability
+      +
+Hospital capacity
+      +
+Network capacity
+      +
+Crisis constraints
+      ↓
+CLINICAL DECISION ENGINE
+      ↓
+Recommendation
+      ↓
+Human clinician
+```
+
+The AI produces evidence and predictions. The Decision Engine applies explicit clinical/governance rules and operational constraints to produce a constrained recommendation for clinician review.
+
+This makes Sundara Command a **clinical decision-support and emergency orchestration system**, rather than simply "an AI triage model."
+
+### 6. Product lifecycle: Sense → Predict → Prioritize → Act → Learn
+
+**Sense**
+- EHR
+- vitals
+- labs
+- clinical notes
+- hospital state
+- network state
+- crisis events
+
+**Predict**
+- Who is likely to deteriorate?
+- What demand/resources are likely to be needed?
+
+**Prioritize**
+- Who needs attention first?
+- Apply clinical acuity, trajectory, time sensitivity, explicit rules, and waiting-time safeguards.
+
+**Act**
+- What resource-aware action should be considered?
+- The system recommends; authorized humans decide and execute life-critical actions.
+
+**Learn**
+- What did clinicians accept?
+- What did they override?
+- What happened afterward?
+- Use structured feedback for retrospective evaluation and future improvement.
+
+### 7. Override is feedback, not automatic retraining
+
+```text
+AI Recommendation
+       ↓
+Clinician Decision
+       ↓
+┌───────────────┬───────────────┐
+│               │
+Accepted       Override
+│               │
+│          Reason captured
+│               │
+└───────┬───────┘
+        ▼
+    Audit Log
+        │
+        ▼
+Future Evaluation
+```
+
+Every override should capture:
+- recommendation shown
+- relevant model/rule outputs
+- clinician action
+- structured override reason
+- timestamp
+- resulting priority/action
+- reassessment requirement, where applicable
+
+**Do not claim that overrides automatically retrain the model during the competition demo.**
+
+Instead:
+
+> "Overrides are captured as structured feedback for retrospective model evaluation, error analysis, governance review, and potential future model improvement."
+
+AHRQ also emphasizes the importance of monitoring and evaluating CDS performance rather than treating deployed decision support as static or self-validating. citeturn0search5turn0search3
+
+
 
 ### AI Powered Emergency Response & Triage Orchestration
 
@@ -130,7 +379,7 @@ Prioritize patients using:
 - Deterioration risk
 - Time sensitivity
 - Data completeness
-- Model confidence
+- Model prediction reliability
 
 ### Reallocate
 
@@ -169,7 +418,7 @@ Patient P-1042
 
 Priority: CRITICAL
 Deterioration Risk: 87%
-Confidence: 94%
+Prediction Reliability: 94%
 
 Why?
 - SpO₂ 89%
@@ -193,7 +442,7 @@ Two patients may have nearly identical acuity.
 ```text
 Acuity: 8.5
 Deterioration risk: 83%
-Confidence: 96%
+Prediction Reliability: 96%
 Data completeness: 94%
 ```
 
@@ -202,7 +451,7 @@ Data completeness: 94%
 ```text
 Acuity: 8.5
 Deterioration risk: 86%
-Confidence: 58%
+Prediction Reliability: 58%
 Data completeness: 41%
 New / unknown patient
 ```
@@ -215,7 +464,7 @@ Instead:
 Patient B
 
 Risk estimate: 86%
-Confidence: 58%
+Prediction Reliability: 58%
 
 ⚠ HIGH UNCERTAINTY
 
@@ -232,7 +481,7 @@ and additional data collection
 
 Core design principle:
 
-> **The system separates clinical risk from confidence in the prediction. Missing information does not become false certainty.**
+> **The system separates clinical risk from prediction reliability in the prediction. Missing information does not become false certainty.**
 
 ---
 
@@ -353,7 +602,7 @@ Example:
 CRITICAL PRIORITY
 
 Deterioration Risk: 87%
-Confidence: 94%
+Prediction Reliability: 94%
 Time Sensitivity: HIGH
 
 Recommended:
@@ -366,7 +615,7 @@ Use:
 
 - Clinical Priority
 - AI Deterioration Risk
-- Confidence
+- Prediction Reliability
 
 These are different concepts.
 
@@ -433,7 +682,7 @@ The AI is not waiting until the patient becomes critical.
 
 ---
 
-# 6. Confidence and Uncertainty
+# 6. Prediction Reliability and Uncertainty
 
 Every important recommendation should expose uncertainty.
 
@@ -441,7 +690,7 @@ Example:
 
 ```text
 Deterioration Risk: 84%
-Confidence: 61% ⚠ LOW
+Prediction Reliability: 61% ⚠ LOW
 ```
 
 Reasons:
@@ -566,7 +815,7 @@ AI generated priority #1
 
 20:11:04
 Risk: 87%
-Confidence: 94%
+Prediction Reliability: 94%
 
 20:14:12
 Charge nurse opened recommendation
@@ -604,7 +853,7 @@ This answers:
 ║ 🔴 CRITICAL PRIORITY                               ║
 ║                                                    ║
 ║ Deterioration Risk       87%                       ║
-║ Confidence               94%                       ║
+║ Prediction Reliability               94%                       ║
 ║ Time Sensitivity         HIGH                      ║
 ║                                                    ║
 ╠════════════════════════════════════════════════════╣
@@ -1343,14 +1592,14 @@ The system should show:
 
 ```text
 Risk = 87%
-Confidence = 94%
+Prediction Reliability = 94%
 ```
 
 versus:
 
 ```text
 Risk = 84%
-Confidence = 58%
+Prediction Reliability = 58%
 ```
 
 A practical MVP approach is a **deep ensemble**.
@@ -1437,11 +1686,11 @@ New:
 Severe pediatric burn + smoke inhalation
 ```
 
-Instead of false confidence:
+Instead of false prediction reliability:
 
 ```text
 Risk = 93%
-Confidence = 97%
+Prediction Reliability = 97%
 ```
 
 show:
@@ -1449,7 +1698,7 @@ show:
 ```text
 ⚠ UNFAMILIAR PATIENT PROFILE
 
-Model confidence reduced.
+Model prediction reliability reduced.
 
 Reason:
 Patient characteristics differ significantly
@@ -1689,7 +1938,7 @@ Clinical notes
 ```text
 Risk
 Deterioration probability
-Confidence
+Prediction Reliability
 Missing information
 ```
 
@@ -1699,7 +1948,7 @@ Missing information
 🔴 CRITICAL
 
 Risk: 87%
-Confidence: 94%
+Prediction Reliability: 94%
 
 WHY?
 • SpO₂ 89%
