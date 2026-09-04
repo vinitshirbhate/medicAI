@@ -11,12 +11,14 @@ from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSock
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+from banding import CONFIDENCE_THRESHOLD, ESCALATION_CONFIDENCE_THRESHOLD, uncertainty_band
 from intake_extraction import extract_intake
+from second_opinion import run_second_opinion
+from trend_features import features_for, summarise
 from voice_intake import load_model, model_status, transcribe, transcribe_segment
 
 DB = Path(os.getenv("SUNDARA_DB_PATH", Path(__file__).with_name("sundara.db")))
-MODEL_VERSION = "sundara-triage-demo-0.1.0"
-CONFIDENCE_THRESHOLD = .65
+MODEL_VERSION = "sundara-triage-demo-0.1.0"  # The engine. An advisory model logs its own id per entry.
 UTC = timezone.utc
 
 def now() -> str: return datetime.now(UTC).isoformat()
@@ -75,6 +77,11 @@ class Patient(BaseModel):
     pathway_detail: dict[str, Any] = Field(default_factory=dict)
     notes: str = ""
     vitals: Vitals
+
+class SecondOpinionRequest(BaseModel):
+    intake_draft: dict[str,Any] | None = None
+    actor: str = "VOICE_CONSOLE"
+    force_refresh: bool = False
 
 class Decision(BaseModel):
     actor: str = Field(min_length=1)
@@ -180,7 +187,7 @@ def calculate(p: dict[str, Any]) -> dict[str, Any]:
     spread = round(max(ensemble) - min(ensemble), 3); ood = p["age"] < 16 and p["pathway"] == "BURN_SMOKE"
     reliability = round(max(.2, min(.98, .94 - spread * 2.5 - (1 - complete) * .45 - (.18 if ood else 0))), 2)
     low = reliability < CONFIDENCE_THRESHOLD
-    escalation = {"to_band": p["protocol_band"] - 1, "status": "AWAITING_CONFIRMATION", "evidence": [x["clinical_label"] for x in contributions[:3]]} if risk >= .8 and reliability >= .8 and p["protocol_band"] > 1 else None
+    escalation = {"to_band": p["protocol_band"] - 1, "status": "AWAITING_CONFIRMATION", "evidence": [x["clinical_label"] for x in contributions[:3]]} if risk >= .8 and reliability >= ESCALATION_CONFIDENCE_THRESHOLD and p["protocol_band"] > 1 else None
     return {"patient_id": p["patient_id"], "assessed_at": now(), "initiated_by": "AI", "model_version": MODEL_VERSION, "protocol_band": p["protocol_band"], "deterioration_risk": risk, "prediction_reliability": reliability, "data_completeness": complete, "completeness_breakdown": breakdown, "time_sensitivity": "HIGH" if risk >= .65 else "MODERATE", "forecast": {"horizon_hours": 2, "trajectory": ["MODERATE", "HIGH", "CRITICAL"] if risk >= .7 else ["LOW", "MODERATE", "HIGH"], "probability": risk}, "explanation": {"one_line": "; ".join(x["clinical_label"] for x in contributions[:3]) or "No high-risk feature identified.", "contributions": contributions}, "observations_used": len(series), "news2": {"first": first, "latest": last, "rise_points": NEWS2_RISE_POINTS}, "uncertainty": {"is_low_confidence": low, "reasons": missing if low else [], "ood_flag": ood, "ensemble_spread": spread}, "proposed_escalation": escalation, "recommended_action": {"primary": "Priority clinical reassessment" if low else "Immediate clinician assessment" if risk >= .65 else "Clinical assessment when available", "preparation": ["Continuous SpO2 monitoring", "Repeat CBC"] if risk >= .65 else [], "verb": "SUGGESTED"}, "prefilled_override": {"reason_code": "BEDSIDE_ASSESSMENT_DIFFERS", "reason_text": "System uncertainty: " + "; ".join(missing), "reassessment_minutes": 10} if low else None, "resource_recommendation": resources(p, risk)}
 
 def save_assessment(p: dict[str, Any]) -> dict[str, Any]:
@@ -233,7 +240,7 @@ def network_resources() -> dict[str, Any]:
 
 def setup() -> None:
     with conn() as c:
-        c.executescript("""CREATE TABLE IF NOT EXISTS patients(patient_id TEXT PRIMARY KEY,payload TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS vitals(id INTEGER PRIMARY KEY AUTOINCREMENT,patient_id TEXT NOT NULL,payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS assessments(patient_id TEXT PRIMARY KEY,payload TEXT NOT NULL,assessed_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,entry TEXT NOT NULL,prev_hash TEXT NOT NULL,hash TEXT NOT NULL);""")
+        c.executescript("""CREATE TABLE IF NOT EXISTS patients(patient_id TEXT PRIMARY KEY,payload TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS vitals(id INTEGER PRIMARY KEY AUTOINCREMENT,patient_id TEXT NOT NULL,payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS assessments(patient_id TEXT PRIMARY KEY,payload TEXT NOT NULL,assessed_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,entry TEXT NOT NULL,prev_hash TEXT NOT NULL,hash TEXT NOT NULL); CREATE TABLE IF NOT EXISTS second_opinions(fingerprint TEXT PRIMARY KEY,patient_id TEXT NOT NULL,model_id TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL);""")
     seed()
 
 @asynccontextmanager
@@ -300,6 +307,35 @@ async def add_vitals(patient_id:str,payload:Vitals)->dict[str,Any]:
         if not row: raise HTTPException(404,"patient not found")
         c.execute("INSERT INTO vitals(patient_id,payload) VALUES(?,?)",(patient_id,dump(payload.model_dump(mode="json"))))
     assessment=save_assessment(json.loads(row["payload"])); await hub.broadcast(); return assessment
+@app.post("/api/v1/patients/{patient_id}/second-opinion")
+async def second_opinion(patient_id:str,payload:SecondOpinionRequest)->dict[str,Any]:
+    """An advisory reading beside the engine's. Never ranks, never escalates, always logged."""
+    with conn() as c:
+        patient_row=c.execute("SELECT payload FROM patients WHERE patient_id=?",(patient_id,)).fetchone()
+        assessment_row=c.execute("SELECT payload FROM assessments WHERE patient_id=?",(patient_id,)).fetchone()
+    if not patient_row: raise HTTPException(404,"patient not found")
+    if not assessment_row: raise HTTPException(409,"no engine assessment yet; create the record first")
+    patient,assessment=json.loads(patient_row["payload"]),json.loads(assessment_row["payload"])
+    series=vitals_for(patient_id)
+    trends=await asyncio.to_thread(lambda:summarise(features_for(patient_id,series)))
+    result=await asyncio.to_thread(run_second_opinion,patient=patient,assessment=assessment,latest=series[-1] if series else {},
+        trends=trends,intake_draft=payload.intake_draft,connect=conn,force_refresh=payload.force_refresh,generated_at=now())
+    advisory=result["second_opinion"]
+    audit("LLM_SECOND_OPINION","AI","OPENROUTER_SECOND_OPINION",patient_id,{
+        "status":result["status"],"role":"ADVISORY_ONLY","trend_source":result.get("trend_source"),
+        "advisory_model_id":advisory.get("advisory_model_id"),"prompt_version":advisory.get("prompt_version"),
+        "payload_fingerprint":advisory.get("payload_fingerprint"),"cached":advisory.get("cached",False),"forced":payload.force_refresh,
+        "engine":{key:result["engine"][key] for key in ("deterioration_risk","prediction_reliability","data_completeness")},
+        "second_opinion":{key:advisory.get(key) for key in ("deterioration_risk","prediction_reliability","data_completeness")},
+        "divergence":{key:result["divergence"].get(key) for key in ("status","risk_delta_pp","threshold_pp","differing_lines")},
+        "affected_rank":False,"rejection_reasons":(result.get("degraded") or {}).get("detail",[])})
+    return result
+@app.get("/api/v1/patients/{patient_id}/trends")
+def patient_trends(patient_id:str)->dict[str,Any]:
+    """Factual trend features from the time-series service, or locally derived and labelled as such."""
+    with conn() as c:
+        if not c.execute("SELECT 1 FROM patients WHERE patient_id=?",(patient_id,)).fetchone(): raise HTTPException(404,"patient not found")
+    return features_for(patient_id,vitals_for(patient_id))
 @app.get("/api/v1/patients/{patient_id}/assessment")
 def assessment(patient_id:str)->dict[str,Any]:
     with conn() as c: row=c.execute("SELECT payload FROM assessments WHERE patient_id=?",(patient_id,)).fetchone()
@@ -328,7 +364,7 @@ def verify_audit()->dict[str,Any]:
     return {"valid":True,"head_hash":previous}
 @app.post("/api/v1/demo/reset")
 async def reset_demo()->dict[str,Any]:
-    with conn() as c: c.executescript("DELETE FROM audit; DELETE FROM assessments; DELETE FROM vitals; DELETE FROM patients;")
+    with conn() as c: c.executescript("DELETE FROM audit; DELETE FROM assessments; DELETE FROM vitals; DELETE FROM patients; DELETE FROM second_opinions;")
     seed(); await hub.broadcast(); return {"status":"reset","patients":len(queue())}
 @app.websocket("/ws/queue")
 async def queue_socket(socket:WebSocket)->None:

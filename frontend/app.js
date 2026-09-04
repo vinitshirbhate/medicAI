@@ -231,6 +231,7 @@ function prepareConfirmation(draft) {
     ? `An earlier reading will be recorded from the trajectory you described: ${trends.map(([name, t]) => `${titleCase(name)} ${t.from} → ${t.to}`).join(", ")}. Its clock time was not spoken, so only its order is used.`
     : "";
   document.querySelector("#create-result").hidden = true;
+  document.querySelector("#second-opinion").hidden = true;  // never show the previous patient's panel
   checkReady();
 }
 
@@ -275,6 +276,8 @@ document.querySelector("#create").addEventListener("click", async () => {
         ...Object.fromEntries(trends.map(([name, trend]) => [name, { value: trend.from }])),
       });
     }
+    // Fire and forget: an external model must never delay the confirmation the nurse is waiting on.
+    requestSecondOpinion(assessment.patient_id);
     const news2 = assessment.news2 || {};
     result.textContent = `Record created. Deterioration risk ${assessment.deterioration_risk} from ${assessment.observations_used} observation(s)`
       + (news2.first !== null && news2.first !== undefined ? `, NEWS2 ${news2.first} → ${news2.latest}` : "")
@@ -286,6 +289,19 @@ document.querySelector("#create").addEventListener("click", async () => {
     checkReady();
   }
 });
+
+async function requestSecondOpinion(patientId) {
+  try {
+    renderSecondOpinion(await send(`${API}/patients/${patientId}/second-opinion`,
+      { intake_draft: confirmedDraft, actor: "VOICE_CONSOLE" }));
+  } catch (error) {
+    console.warn("Second opinion request failed", error);
+    document.querySelector("#second-opinion").hidden = false;
+    document.querySelector("#so-degraded").hidden = false;
+    document.querySelector("#so-degraded").textContent =
+      `Second opinion unavailable — ${error.message}. The engine assessment stands alone.`;
+  }
+}
 
 async function send(url, body) {
   const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });

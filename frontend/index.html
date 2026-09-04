@@ -86,8 +86,32 @@
           <button id="create" class="primary" disabled>Create record</button>
           <p id="create-result" class="create-result" hidden></p>
         </article>
+
+        <article class="card second-opinion-card" id="second-opinion" hidden>
+          <p class="label">ASSESSMENT <span id="so-status" class="so-chip"></span></p>
+          <p class="subtle" id="so-authority"></p>
+          <div id="so-degraded" class="so-degraded" hidden></div>
+          <div class="so-columns">
+            <div>
+              <p class="so-column-title">SUNDARA ENGINE <span>ranks this patient</span></p>
+              <dl id="so-engine"></dl>
+              <ul id="so-engine-reasons" class="so-reasons" hidden></ul>
+            </div>
+            <div class="so-advisory">
+              <p class="so-column-title">ADVISORY MODEL <span>not a clinical opinion</span></p>
+              <dl id="so-advisory"></dl>
+              <ul id="so-advisory-reasons" class="so-reasons" hidden></ul>
+            </div>
+          </div>
+          <p id="so-divergence" class="so-divergence" hidden></p>
+          <p id="so-narrative" class="so-narrative" hidden></p>
+          <ul id="so-evidence" class="so-evidence" hidden></ul>
+          <p id="so-trend" class="so-trend"></p>
+        </article>
+
       </section>
     </main>
+    <script src="second_opinion.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

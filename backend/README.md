@@ -41,6 +41,65 @@ converts Fahrenheit. Three rules keep it honest:
 
 Nothing here assigns a protocol band. `uv run pytest` covers the phrasings and the refusals.
 
+## Advisory second opinion (OpenRouter)
+
+`POST /api/v1/patients/{id}/second-opinion` asks a hosted model for its own reading of the same
+patient and returns it **beside** the engine's, in four fixed lines:
+
+```
+                         SUNDARA ENGINE     ADVISORY MODEL
+Deterioration Risk                  87%                74%
+Prediction Reliability             HIGH               LOW
+Data Completeness                   91%                88%
+Uncertainty                         LOW              HIGH
+```
+
+The engine alone ranks the patient. The advisory reading is displayed, audited, and ignored by the
+queue: `divergence.affects_rank` is a literal `false` in the wire format, `second_opinion.py` never
+imports `main`, and a test asserts the queue and the stored assessment are byte-identical before and
+after a wildly divergent opinion arrives.
+
+**Nothing the model returns is shown unverified.** An opinion is discarded whole — with its reasons
+on screen — if it cites a field absent from the payload, states a value the payload contradicts,
+quotes a phrase that was never supplied, names a reliability reason outside the closed vocabulary,
+returns a number outside 0-1, mentions ranking or treatment, or writes any number that does not
+appear in its input. Partial trust is not a thing a clinical panel can render.
+
+**What is sent:** age, sex, arrival mode, symptoms, known conditions, pathway detail, the latest
+observation with its spoken evidence phrases, and trend features. **What is withheld:** the patient
+identifier and arrival time, the raw transcript (free text carries identifiers, and re-sending it
+would hand back values extraction refused as implausible), and every engine conclusion — an anchored
+second opinion produces a divergence signal worth nothing.
+
+Trend features come from the time-series service at `TIME_SERIES_URL` when it is reachable, and are
+otherwise derived from this service's own series using that service's own functions. The response
+always names which happened (`trend_source`, `trend_note`); locally derived features are never
+presented as service-derived.
+
+### Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENROUTER_API_KEY` | — | Required. Read from `backend/.env`, which is gitignored |
+| `SECOND_OPINION_MODEL` | `openai/gpt-4.1-nano` | Cheapest OpenAI model on OpenRouter with structured outputs, temperature and seed |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Point at a local OpenAI-compatible server and nothing leaves the building |
+| `SECOND_OPINION_ENABLED` | `1` | Kill switch; set to `0` for an air-gapped demo |
+| `SECOND_OPINION_CACHE_ONLY` | `0` | Serve only cached opinions; never call out |
+| `SECOND_OPINION_MAX_CALLS_PER_RUN` | `50` | Spend guard |
+
+Every failure — no key, kill switch, timeout, upstream error, unreadable output, rejected output —
+returns HTTP 200 with the engine block intact and a named `degraded.reason_code`. The panel says
+which state it is in; it never silently shows nothing.
+
+Responses are cached in SQLite keyed by a hash of the input, prompt version and model, so a repeated
+demo run is identical and free. Sampling parameters are best effort on a hosted model; **the cache is
+what actually delivers reproducibility**, not `temperature: 0`.
+
+**Assumptions needing sign-off:** `DIVERGENCE_RISK_PP = 15` is tuned for this demo, not derived. The
+privacy stance is that data is synthetic (NFR-09), no identifier is sent, and in deployment this
+component runs against a locally hosted OpenAI-compatible model at the hospital edge — the cloud
+endpoint is a hackathon convenience, which is why `OPENROUTER_BASE_URL` is configurable.
+
 ## Serial vitals from a spoken trajectory
 
 "Her saturation has been falling from 96 to 89" is a trajectory, not a reading. Extraction records it
