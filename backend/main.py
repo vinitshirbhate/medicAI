@@ -13,6 +13,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from banding import CONFIDENCE_THRESHOLD, ESCALATION_CONFIDENCE_THRESHOLD, uncertainty_band
 from intake_extraction import extract_intake
+import mongo_store
+from mock_patients import mock_records
 from second_opinion import run_second_opinion
 from trend_features import features_for, summarise
 from voice_intake import load_model, model_status, transcribe, transcribe_segment
@@ -210,26 +212,43 @@ def queue() -> list[dict[str, Any]]:
         band = item["protocol_band"]; seen[band] = seen.get(band, 0) + 1; item["global_rank"] = index; item["rank_within_band"] = seen[band]
     return [item for _, item in result]
 
+def store_patient(patient: dict[str, Any], observations: list[dict[str, Any]]) -> None:
+    """Write a patient and its series into the local working store, then assess it."""
+    with conn() as c:
+        c.execute("INSERT OR REPLACE INTO patients VALUES(?,?,?)", (patient["patient_id"], dump(patient), now()))
+        c.execute("DELETE FROM vitals WHERE patient_id=?", (patient["patient_id"],))
+        for observation in observations:
+            c.execute("INSERT INTO vitals(patient_id,payload) VALUES(?,?)", (patient["patient_id"], dump(observation)))
+    save_assessment(patient)
+
 def seed() -> None:
-    base = datetime.now(UTC) - timedelta(minutes=16)
-    cases = [
-        ({"patient_id":"P-1042","hospital_id":"SUNDARA_CENTRAL","age":46,"sex":"F","arrival_time":base.isoformat(),"arrival_mode":"AMBULANCE","is_new_patient":False,"chief_complaint":"Shortness of breath and high fever","pathway":"DENGUE","protocol_band":2,"symptoms":{"fever":True,"breathlessness":True},"known_conditions":{"dengue":"CONFIRMED"},"pathway_detail":{"platelet_trend":[128000,110000,96000,82000],"lactate_mmol_l":3.1},"notes":"Synthetic demo case"}, {"heart_rate":128,"systolic_bp":94,"diastolic_bp":62,"spo2":89,"respiratory_rate":29,"temperature_c":39.4,"gcs":14}),
-        ({"patient_id":"P-1043","hospital_id":"SUNDARA_CENTRAL","age":46,"sex":"UNKNOWN","arrival_time":(base+timedelta(minutes=2)).isoformat(),"arrival_mode":"AMBULANCE","is_new_patient":True,"chief_complaint":"Fever and dizziness","pathway":"DENGUE","protocol_band":2,"symptoms":{"fever":True},"known_conditions":{"dengue":"UNKNOWN"},"pathway_detail":{},"notes":"Synthetic demo case"}, {"heart_rate":126,"systolic_bp":96,"diastolic_bp":64,"spo2":None,"respiratory_rate":28,"temperature_c":39.1,"gcs":14}),
-    ]
-    for patient, values in cases:
+    """Bring the demo cohort into the working store.
+
+    MongoDB is the record when it answers: its patients are hydrated here and assessed locally, so a
+    cluster that already holds a nurse-created patient still shows it after a restart. When it does
+    not answer — no network, blocked port, IP not on the access list — the same five synthetic
+    patients are seeded locally instead, and the queue is identical.
+    """
+    if mongo_store.is_available():
+        mongo_store.seed_mock_patients()
+        for patient, observations in mongo_store.load_all():
+            if not observations:
+                continue  # An assessment needs at least one observation; skip rather than invent one.
+            with conn() as c:
+                assessed = c.execute("SELECT 1 FROM assessments WHERE patient_id=?", (patient["patient_id"],)).fetchone()
+            if not assessed:
+                store_patient(patient, observations)
+        return
+    for patient, observations in mock_records():
         with conn() as c:
             existing = c.execute("SELECT payload FROM patients WHERE patient_id=?", (patient["patient_id"],)).fetchone()
-            has_assessment = c.execute("SELECT 1 FROM assessments WHERE patient_id=?", (patient["patient_id"],)).fetchone()
-            if existing and has_assessment:
-                continue
+            assessed = c.execute("SELECT 1 FROM assessments WHERE patient_id=?", (patient["patient_id"],)).fetchone()
+        if existing and assessed:
+            continue
         if existing:
             save_assessment(json.loads(existing["payload"]))
             continue
-        observation = {"observed_at":now(),"source":"SIMULATED_EHR", **{k:{"value":v,"missing":v is None} for k,v in values.items()}}
-        with conn() as c:
-            c.execute("INSERT INTO patients VALUES(?,?,?)", (patient["patient_id"],dump(patient),now()))
-            c.execute("INSERT INTO vitals(patient_id,payload) VALUES(?,?)", (patient["patient_id"],dump(observation)))
-        save_assessment(patient)
+        store_patient(patient, observations)
 
 def list_patients() -> list[dict[str, Any]]:
     with conn() as c: rows = c.execute("SELECT payload FROM patients").fetchall()
@@ -248,10 +267,27 @@ async def lifespan(_: FastAPI):
     setup(); yield
 
 app = FastAPI(title="Sundara Command API", version="0.1.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000","http://127.0.0.1:3000"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000","http://127.0.0.1:3000","http://localhost:5173","http://127.0.0.1:5173"], allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/health")
-def health() -> dict[str,str]: return {"status":"ok","mode":"synthetic-demo-only"}
+def health() -> dict[str,Any]:
+    store = mongo_store.status()
+    return {"status":"ok","mode":"synthetic-demo-only","model_version":MODEL_VERSION,
+            "record_store":"mongodb" if store["connected"] else "sqlite-local",
+            "mongodb":{"connected":store["connected"],"database":store["database"]}}
+@app.get("/api/v1/system/status")
+def system_status(refresh: bool = False) -> dict[str,Any]:
+    """Backend and record-store readiness for the console Settings page.
+
+    `refresh=true` bypasses the record store's reconnect backoff, which is what the operator means
+    by pressing Check status; an ordinary poll must not pay a failed connection's timeout.
+    """
+    store = mongo_store.status(force=refresh)
+    with conn() as c:
+        counts = {name: c.execute(f"SELECT COUNT(*) n FROM {name}").fetchone()["n"] for name in ("patients","vitals","assessments","audit")}
+    return {"api":{"status":"ok","model_version":MODEL_VERSION,"mode":"synthetic-demo-only"},
+            "mongodb":{**store,"reason":store["reason"] if not store["connected"] else "connected"},
+            "local_store":counts}
 @app.get("/api/v1/voice/model-status")
 def voice_model_status() -> dict[str,Any]: return model_status()
 @app.post("/api/v1/voice/warmup")
@@ -292,6 +328,18 @@ async def transcribe_voice_segment(audio: UploadFile = File(...)) -> dict[str,st
     except Exception as error:
         raise HTTPException(503, "Local Whisper segment transcription unavailable.") from error
     return {"transcript": transcript}
+@app.get("/api/v1/patients")
+def get_patients() -> dict[str,Any]:
+    """Every registered patient with its latest observation. Demographics the queue does not carry."""
+    patients = sorted(list_patients(), key=lambda p: p["arrival_time"], reverse=True)
+    return {"count":len(patients),"source":"mongodb" if mongo_store.is_available() else "sqlite-local",
+            "patients":[{**p,"observations":len(vitals_for(p["patient_id"])),"latest_observation":(vitals_for(p["patient_id"]) or [None])[-1]} for p in patients]}
+@app.get("/api/v1/patients/{patient_id}")
+def get_patient(patient_id:str) -> dict[str,Any]:
+    """One patient with its full observation series, for the assessment page's trend view."""
+    with conn() as c: row=c.execute("SELECT payload FROM patients WHERE patient_id=?",(patient_id,)).fetchone()
+    if not row: raise HTTPException(404,"patient not found")
+    return {**json.loads(row["payload"]),"observations":vitals_for(patient_id)}
 @app.get("/api/v1/queue")
 def get_queue() -> dict[str,Any]: return {"updated_at":now(),"ranking_policy":"protocol band, then risk, time sensitivity, wait equity; reliability gates only","patients":queue()}
 @app.post("/api/v1/patients",status_code=201)
@@ -299,6 +347,8 @@ async def create_patient(payload: Patient) -> dict[str,Any]:
     with conn() as c:
         if c.execute("SELECT 1 FROM patients WHERE patient_id=?",(payload.patient_id,)).fetchone(): raise HTTPException(409,"patient_id already exists")
         patient = payload.model_dump(mode="json",exclude={"vitals"}); c.execute("INSERT INTO patients VALUES(?,?,?)",(payload.patient_id,dump(patient),now())); c.execute("INSERT INTO vitals(patient_id,payload) VALUES(?,?)",(payload.patient_id,dump(payload.vitals.model_dump(mode="json"))))
+    observation=payload.vitals.model_dump(mode="json")
+    mongo_store.upsert_patient(patient); mongo_store.append_observation(payload.patient_id,observation)
     assessment=save_assessment(patient); await hub.broadcast(); return assessment
 @app.post("/api/v1/patients/{patient_id}/vitals")
 async def add_vitals(patient_id:str,payload:Vitals)->dict[str,Any]:
@@ -306,6 +356,7 @@ async def add_vitals(patient_id:str,payload:Vitals)->dict[str,Any]:
         row=c.execute("SELECT payload FROM patients WHERE patient_id=?",(patient_id,)).fetchone()
         if not row: raise HTTPException(404,"patient not found")
         c.execute("INSERT INTO vitals(patient_id,payload) VALUES(?,?)",(patient_id,dump(payload.model_dump(mode="json"))))
+    mongo_store.append_observation(patient_id,payload.model_dump(mode="json"))
     assessment=save_assessment(json.loads(row["payload"])); await hub.broadcast(); return assessment
 @app.post("/api/v1/patients/{patient_id}/second-opinion")
 async def second_opinion(patient_id:str,payload:SecondOpinionRequest)->dict[str,Any]:
@@ -365,6 +416,7 @@ def verify_audit()->dict[str,Any]:
 @app.post("/api/v1/demo/reset")
 async def reset_demo()->dict[str,Any]:
     with conn() as c: c.executescript("DELETE FROM audit; DELETE FROM assessments; DELETE FROM vitals; DELETE FROM patients; DELETE FROM second_opinions;")
+    mongo_store.seed_mock_patients(replace=True)
     seed(); await hub.broadcast(); return {"status":"reset","patients":len(queue())}
 @app.websocket("/ws/queue")
 async def queue_socket(socket:WebSocket)->None:
