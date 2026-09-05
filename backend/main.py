@@ -12,7 +12,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from banding import CONFIDENCE_THRESHOLD, ESCALATION_CONFIDENCE_THRESHOLD, uncertainty_band
+from case_facts import BASELINE_ICU_OCCUPANCY_PCT, FIRE_CASUALTIES, STRIKE_END, STRIKE_START, STRIKE_STAFF_UNAVAILABLE_PCT
 from intake_extraction import extract_intake
+from staffing import REACHABILITY, infeasibility_summaries, staffing_plan
 import mongo_store
 from mock_patients import mock_records
 from second_opinion import run_second_opinion
@@ -254,8 +256,14 @@ def list_patients() -> list[dict[str, Any]]:
     with conn() as c: rows = c.execute("SELECT payload FROM patients").fetchall()
     return [json.loads(row["payload"]) for row in rows]
 
+def network_hospitals() -> list[dict[str,Any]]:
+    return [{"hospital_id":"SUNDARA_CENTRAL","icu":{"total":40,"occupied":40,"available":0},"ed":{"total":80,"occupied":71,"available":9},"staff":{"doctors":{"scheduled":22,"available":19},"nurses":{"scheduled":48,"available":37}}},{"hospital_id":"SUNDARA_NORTH","icu":{"total":30,"occupied":29,"available":1},"ed":{"total":60,"occupied":46,"available":14},"staff":{"doctors":{"scheduled":18,"available":16},"nurses":{"scheduled":38,"available":34}}}]
+
 def network_resources() -> dict[str, Any]:
-    return {"network_icu_occupancy_pct":93,"active_events":[{"type":"OUTBREAK","severity":"HIGH"},{"type":"MASS_CASUALTY","casualties":84},{"type":"TRANSIT_DISRUPTION","staff_unavailable_pct":24}],"hospitals":[{"hospital_id":"SUNDARA_CENTRAL","icu":{"total":40,"occupied":40,"available":0},"ed":{"total":80,"occupied":71,"available":9},"staff":{"doctors":{"scheduled":22,"available":19},"nurses":{"scheduled":48,"available":37}}},{"hospital_id":"SUNDARA_NORTH","icu":{"total":30,"occupied":29,"available":1},"ed":{"total":60,"occupied":46,"available":14},"staff":{"doctors":{"scheduled":18,"available":16},"nurses":{"scheduled":38,"available":34}}}],"infeasibilities":[{"request":"Reassign nurses from SUNDARA_EAST to SUNDARA_CENTRAL","status":"IMPOSSIBLE","reason":"Transit corridor unavailable during strike","alternative":"Route eligible high-acuity arrivals to SUNDARA_NORTH"}]}
+    # The infeasibility list is computed by the staffing module rather than written here, so the
+    # capacity panel and the staffing plan cannot state different things about the same night.
+    plan = staffing_plan(network_hospitals(), queue())
+    return {"network_icu_occupancy_pct":BASELINE_ICU_OCCUPANCY_PCT,"active_events":[{"type":"OUTBREAK","severity":"HIGH"},{"type":"MASS_CASUALTY","casualties":FIRE_CASUALTIES},{"type":"TRANSIT_DISRUPTION","staff_unavailable_pct":STRIKE_STAFF_UNAVAILABLE_PCT,"start":STRIKE_START.isoformat(),"expected_end":STRIKE_END.isoformat(),"reachability":REACHABILITY}],"hospitals":network_hospitals(),"infeasibilities":infeasibility_summaries(plan)}
 
 def setup() -> None:
     with conn() as c:
@@ -401,6 +409,17 @@ async def override(patient_id:str,payload:Decision)->dict[str,Any]:
     due=(datetime.now(UTC)+timedelta(minutes=10)).isoformat(); audit("OVERRIDE","HUMAN",payload.actor,patient_id,{"reason_code":payload.reason_code,"reason_text":payload.reason_text,"new_rank":payload.new_rank,"reassessment_due":due}); await hub.broadcast(); return {"status":"override_accepted","message":"Override accepted. Reassessment recommended in 10 minutes.","reassessment_due":due}
 @app.get("/api/v1/resources")
 def resource_state()->dict[str,Any]: return network_resources()
+@app.get("/api/v1/resources/staffing-plan")
+def staffing_recommendation(at:datetime|None=None)->dict[str,Any]:
+    """A proposed staffing plan that names what tonight makes impossible.
+
+    Evaluated at a pinned instant inside the strike window by default. Pass `at` to see the plan at
+    another time: after 06:00 the corridor reopens and the blocked reassignment becomes feasible,
+    which is the demonstration that the constraint is code rather than a label. No audit entry is
+    written here — a per-poll record of staffing proposals would read as a workforce log, and the
+    decision worth auditing is a human accepting an action, not the system offering one.
+    """
+    return staffing_plan(network_hospitals(), queue(), at=at)
 @app.get("/api/v1/audit")
 def audit_entries()->list[dict[str,Any]]:
     with conn() as c: rows=c.execute("SELECT seq,entry,hash FROM audit ORDER BY seq").fetchall()

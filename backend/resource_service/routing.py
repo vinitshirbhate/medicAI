@@ -21,8 +21,8 @@ def transfer_plan(request: NetworkPlanRequest) -> dict[str, str | bool | None]:
         return {"feasible": False, "reason": "Only ICU transfer planning is available in this demo", "alternative": None}
     if destination.icu.available < 1:
         return {"feasible": False, "reason": f"No ICU bed available at {destination.hospital_id}", "alternative": "Use a high-acuity stabilization bay and reassess"}
-    if source.hospital_id == "SUNDARA_EAST" and destination.hospital_id == "SUNDARA_CENTRAL":
-        return {"feasible": False, "reason": "Transit corridor unavailable during strike", "alternative": "Route eligible arrival to SUNDARA_NORTH"}
+    # The transit strike constrains staff commuting on public transport, not ambulance patient
+    # transfer, so no reachability check belongs here. Staffing reachability lives in staffing.py.
     return {"feasible": True, "reason": None, "alternative": None}
 
 

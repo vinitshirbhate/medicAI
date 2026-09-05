@@ -1,7 +1,7 @@
 /** The single place that knows the backend's address and error conventions. */
 import type {
   Assessment, AuditEntry, AuditVerification, Observation, PatientDetail, PatientSummary,
-  QueueResponse, ResourceState, SystemStatus,
+  QueueResponse, ResourceState, StaffingPlan, SystemStatus,
 } from "./types";
 
 const FALLBACK_BASE = "http://127.0.0.1:8000";
@@ -80,6 +80,9 @@ export const api = {
       { method: "POST", body: JSON.stringify(body) },
     ),
   resources: () => request<ResourceState>("/api/v1/resources"),
+  // `at` evaluates the plan at another instant: after 06:00 the struck corridor reopens.
+  staffingPlan: (at?: string) =>
+    request<StaffingPlan>(`/api/v1/resources/staffing-plan${at ? `?at=${encodeURIComponent(at)}` : ""}`),
   audit: () => request<AuditEntry[]>("/api/v1/audit"),
   verifyAudit: () => request<AuditVerification>("/api/v1/audit/verify"),
   resetDemo: () => request<{ status: string; patients: number }>("/api/v1/demo/reset", { method: "POST" }),

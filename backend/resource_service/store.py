@@ -33,11 +33,13 @@ SEED_EVENTS = [
     {"type": "MASS_CASUALTY", "severity": "CRITICAL", "details": {"casualties": 84}},
     {"type": "TRANSIT_DISRUPTION", "severity": "HIGH", "details": {"staff_unavailable_pct": 24}},
 ]
+# A fallback for this standalone service only. The triage service computes its own list from
+# staffing.py rather than restating one, so the capacity panel and the staffing plan cannot disagree.
 INFEASIBILITIES = [
     {
-        "request": "Reassign nurses from SUNDARA_EAST to SUNDARA_CENTRAL",
+        "request": "Reassign nurses from SUNDARA_NORTH to SUNDARA_CENTRAL",
         "status": "IMPOSSIBLE",
-        "reason": "Transit corridor unavailable during strike",
+        "reason": "Transit corridor SUNDARA_NORTH -> SUNDARA_CENTRAL is closed for the strike window",
         "alternative": "Route eligible high-acuity arrivals to SUNDARA_NORTH",
     }
 ]

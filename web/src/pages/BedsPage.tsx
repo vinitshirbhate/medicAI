@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import { api } from "@/api/client";
-import type { ResourceState } from "@/api/types";
+import type { ResourceState, StaffingPlan } from "@/api/types";
 import { CapacityMeter, EmptyState, Notice, SectionLabel, StatTile, titleCase } from "@/components/clinical";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -16,19 +16,29 @@ import type { QueueState } from "@/hooks/useQueue";
 
 export function BedsPage({ queue }: { queue: QueueState }) {
   const [resources, setResources] = useState<ResourceState | null>(null);
+  const [staffing, setStaffing] = useState<StaffingPlan | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [staffingError, setStaffingError] = useState<string | null>(null);
+  const [afterStrike, setAfterStrike] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (at?: string) => {
     setLoading(true);
-    try {
-      setResources(await api.resources());
+    // Settled, not all: a staffing failure must never blank the bed table beside it.
+    const [capacity, plan] = await Promise.allSettled([api.resources(), api.staffingPlan(at)]);
+    if (capacity.status === "fulfilled") {
+      setResources(capacity.value);
       setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Resource state unavailable");
-    } finally {
-      setLoading(false);
+    } else {
+      setError(capacity.reason instanceof Error ? capacity.reason.message : "Resource state unavailable");
     }
+    if (plan.status === "fulfilled") {
+      setStaffing(plan.value);
+      setStaffingError(null);
+    } else {
+      setStaffingError(plan.reason instanceof Error ? plan.reason.message : "Staffing plan unavailable");
+    }
+    setLoading(false);
   }, []);
 
   useEffect(() => { void load(); }, [load]);
@@ -90,16 +100,137 @@ export function BedsPage({ queue }: { queue: QueueState }) {
                 <div className="mt-4 space-y-3.5">
                   <CapacityMeter label="ICU beds" used={hospital.icu.occupied} total={hospital.icu.total} />
                   <CapacityMeter label="ED beds" used={hospital.ed.occupied} total={hospital.ed.total} />
-                  <CapacityMeter label="Doctors on shift"
+                  {/* Scheduled and available are both named. The gap is staff who cannot reach site
+                      tonight — not staff who are occupied, and never a comment on any individual. */}
+                  <CapacityMeter label="Doctors reachable tonight"
                     used={hospital.staff.doctors.scheduled - hospital.staff.doctors.available}
-                    total={hospital.staff.doctors.scheduled} note={`${hospital.staff.doctors.scheduled} scheduled`} />
-                  <CapacityMeter label="Nurses on shift"
+                    total={hospital.staff.doctors.scheduled}
+                    note={`${hospital.staff.doctors.scheduled} scheduled · ${hospital.staff.doctors.available} available`} />
+                  <CapacityMeter label="Nurses reachable tonight"
                     used={hospital.staff.nurses.scheduled - hospital.staff.nurses.available}
-                    total={hospital.staff.nurses.scheduled} note={`${hospital.staff.nurses.scheduled} scheduled`} />
+                    total={hospital.staff.nurses.scheduled}
+                    note={`${hospital.staff.nurses.scheduled} scheduled · ${hospital.staff.nurses.available} available`} />
+                  <p className="text-[11.5px] text-ink-3">
+                    {hospital.staff.nurses.scheduled - hospital.staff.nurses.available} nurses and{" "}
+                    {hospital.staff.doctors.scheduled - hospital.staff.doctors.available} doctors cannot reach this
+                    site tonight — transit strike.
+                  </p>
                 </div>
               </div>
             ))}
           </div>
+        ) : null}
+      </section>
+
+      <section className="paper-card p-6">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <SectionLabel>Staffing tonight</SectionLabel>
+            <p className="mt-1 text-[13px] text-ink-3">
+              What can be done with the staff who are actually here, and what the strike makes impossible.
+            </p>
+          </div>
+          <Button variant="outline" className="h-9 rounded-full"
+            onClick={() => {
+              const next = !afterStrike;
+              setAfterStrike(next);
+              void load(next ? staffing?.strike_context.window.end : undefined);
+            }}>
+            {afterStrike ? "Show during strike" : "Evaluate after 06:00"}
+          </Button>
+        </div>
+
+        {staffingError ? (
+          <div className="mt-4">
+            <Notice tone="warn" title="Staffing plan unavailable">
+              <p className="mt-0.5">{staffingError} Capacity figures above are unaffected.</p>
+            </Notice>
+          </div>
+        ) : null}
+
+        {staffing ? (
+          <>
+            <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              <StatTile label="Effective cover" value={staffing.pressure.compounded.effective_cover_pct} unit="%"
+                tone="warn" foot={`${staffing.pressure.chronic_baseline.pct}% chronic and ${staffing.pressure.tonight_additional.pct}% strike compound, they do not add`} />
+              <StatTile label="Blocked reassignments" value={staffing.plan.infeasible_actions.length}
+                tone={staffing.plan.infeasible_actions.length ? "crit" : "ok"}
+                foot={staffing.plan.infeasible_actions.length ? "Named below with an alternative" : "Every corridor is open"} />
+              <StatTile label="Actions available" value={staffing.plan.feasible_actions.length}
+                foot="Each awaits charge-nurse confirmation" />
+              <StatTile label="Still short after the plan"
+                value={Object.values(staffing.plan.residual.shortfall).reduce((a, b) => a + b, 0)}
+                foot="Across every hospital and role" />
+            </div>
+
+            <div className="mt-5 grid gap-4 lg:grid-cols-2">
+              {staffing.hospitals.map((hospital) => (
+                <div key={hospital.hospital_id} className="rounded-[--radius-lg] border p-5" style={{ borderColor: "var(--rule)" }}>
+                  <strong className="text-[15px] font-semibold">{hospital.hospital_id.replace(/_/g, " ")}</strong>
+                  <div className="mt-4 space-y-3.5">
+                    <CapacityMeter label="Nurses required vs available"
+                      used={hospital.demand.required_nurses} total={hospital.staff.nurses.available}
+                      note={hospital.shortfall.nurses ? `${hospital.shortfall.nurses} short` : "covered"} />
+                    <CapacityMeter label="Doctors required vs available"
+                      used={hospital.demand.required_doctors} total={hospital.staff.doctors.available}
+                      note={hospital.shortfall.doctors ? `${hospital.shortfall.doctors} short` : "covered"} />
+                  </div>
+                  <details className="mt-3">
+                    <summary className="cursor-pointer text-[12px] text-ink-3">How this number was reached</summary>
+                    <ul className="mt-2 space-y-1 text-[12px] text-ink-3">
+                      {hospital.demand.derivation.map((line) => <li key={line}>{line}</li>)}
+                    </ul>
+                    <p className="mt-2 text-[11.5px] text-ink-3">{hospital.demand.parameter_source}</p>
+                  </details>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-5">
+              <SectionLabel>What we can do tonight</SectionLabel>
+              {staffing.plan.feasible_actions.length ? (
+                <div className="mt-3 space-y-3">
+                  {staffing.plan.feasible_actions.map((action) => (
+                    <div key={action.action_id} className="rounded-[--radius-lg] border p-4" style={{ borderColor: "var(--rule)" }}>
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <strong className="text-[13.5px] font-semibold">
+                          {action.type === "PATIENT_REDIRECTION"
+                            ? `Redirect ${action.patient_count} eligible arrivals to ${action.to_hospital?.replace(/_/g, " ")}`
+                            : action.type === "WITHIN_HOSPITAL_REDEPLOYMENT"
+                              ? `Redeploy ${action.count} nurses inside ${action.hospital_id?.replace(/_/g, " ")}`
+                              : `Reassign ${action.count} ${action.role?.toLowerCase()}s to ${action.to_hospital?.replace(/_/g, " ")}`}
+                        </strong>
+                        <span className="rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
+                          style={{ background: "var(--ok-wash)", color: "var(--ok-ink)" }}>
+                          {action.corridor_required ? "Corridor open" : "No corridor needed"}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-[13px] text-ink-3">{action.reason}</p>
+                      {action.cost ? <p className="mt-2 text-[13px]" style={{ color: "var(--warn-ink)" }}>Cost: {action.cost}</p> : null}
+                      <p className="mt-2 text-[11.5px] text-ink-3">
+                        {action.verb} · awaiting {titleCase(action.requires_confirmation_by)}
+                        {action.basis ? ` · ${action.basis}` : ""}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-3">
+                  <EmptyState title="No reallocation needed" hint="Every hospital is covered by the staff already on site." />
+                </div>
+              )}
+            </div>
+
+            <div className="mt-5">
+              <Notice tone="crit" title="What cannot be done tonight">
+                <p className="mt-0.5">{staffing.plan.residual.statement}</p>
+                <p className="mt-2">Escalate to: {staffing.plan.residual.escalate_to}</p>
+              </Notice>
+              <p className="mt-3 text-[11.5px] text-ink-3">
+                {staffing.authority.statement} Counts are role totals per unit; no individual is named or tracked.
+              </p>
+            </div>
+          </>
         ) : null}
       </section>
 

@@ -100,6 +100,58 @@ privacy stance is that data is synthetic (NFR-09), no identifier is sent, and in
 component runs against a locally hosted OpenAI-compatible model at the hospital edge — the cloud
 endpoint is a hackathon convenience, which is why `OPENROUTER_BASE_URL` is configurable.
 
+## Staffing plan under the transit strike
+
+`GET /api/v1/resources/staffing-plan` proposes tonight's staffing and, more importantly, names what
+tonight makes impossible. The transit strike is a hard constraint here, not a label: a corridor with
+reachability `0` means the allocator **cannot** use those staff.
+
+```
+Reassign 3 nurses from SUNDARA_NORTH to SUNDARA_CENTRAL          IMPOSSIBLE
+  why      Transit corridor NORTH -> CENTRAL is closed for the 19:00-06:00 window.
+           Those 5 movable nurses exist and are available at North; they cannot reach Central tonight.
+  instead  Redeploy 3 nurses already on site at Central from general cover to the critical cohort.
+```
+
+Three properties make it a realistic plan rather than a theoretical one:
+
+- **Staff already on site need no corridor.** `R[h][h]` is always 1, so within-hospital redeployment
+  is structurally available — and it is **priced**: closing Central's gap thins low-acuity cover from
+  1:4 to 1:6, and the action says so, because the low-acuity 90th-percentile wait is the honesty
+  metric published alongside the headline.
+- **When staff cannot travel, patients can.** Redirecting an eligible arrival to the hospital where
+  the nurses already are is the substitute for moving nurses. The reachability matrix constrains
+  **staff commuting on public transit**, not ambulance transport — the response says so in
+  `applies_to` / `does_not_apply_to`, because it is the first thing a judge will ask.
+- **The residual is always stated**, even at zero: *no staff were added to the network tonight; the
+  gap was redistributed, not solved.*
+
+Candidates are enumerated on the **gross** shortfall and only then split by reachability, so a
+blocked reassignment cannot become a silent omission — an invariant asserted by a test. `available`
+is the only allocator input; `scheduled` is read solely to be displayed, and both are always shown.
+
+Pass `?at=<ISO-8601>` to evaluate at another instant: after 06:00 the corridor reopens and the
+blocked reassignment becomes feasible. That is the demonstration that the constraint is code rather
+than a dashboard label, and it is why the plan is evaluated at a pinned scenario instant instead of
+wall-clock `now()` — running the demo in the morning would otherwise silently open every corridor.
+
+The 21% chronic shortage and 24% strike unavailability **compound and are never added**: the response
+carries the derivation (0.79 × 0.76 = 0.60 → 60% cover) and `naive_sum_not_used: 45`. Neither
+percentage multiplies any observed headcount; the allocator consumes actual available counts only.
+
+**It proposes; it never acts.** Every action is `SUGGESTED` and awaits a charge nurse. The output is
+a count of a role in a unit — never an individual, never a roster, never attendance — and
+unavailability is always attributed to the closed corridor rather than to a person. A staffing tool
+that reads as surveillance forfeits the clinical trust the rest of the system depends on.
+
+`/api/v1/resources` sources its `infeasibilities` from this module, so the capacity panel and the
+staffing panel cannot state different things about the same night.
+
+**Assumption needing sign-off:** the nurse- and doctor-per-bed ratios are Sundara demo policy
+parameters, not case facts. Every requirement ships its derivation so a clinician can recompute it.
+They must not be tuned to manufacture a shortfall — a test locks the seeded premise so a vanished gap
+fails loudly instead of being quietly adjusted away.
+
 ## Serial vitals from a spoken trajectory
 
 "Her saturation has been falling from 96 to 89" is a trajectory, not a reading. Extraction records it

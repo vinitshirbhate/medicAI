@@ -94,9 +94,111 @@ export type HospitalCapacity = {
 
 export type ResourceState = {
   network_icu_occupancy_pct: number;
-  active_events: { type: string; severity?: string; casualties?: number; staff_unavailable_pct?: number }[];
+  active_events: {
+    type: string;
+    severity?: string;
+    casualties?: number;
+    staff_unavailable_pct?: number;
+    start?: string;
+    expected_end?: string;
+    reachability?: Record<string, Record<string, number>>;
+  }[];
   hospitals: HospitalCapacity[];
   infeasibilities: { request: string; status: string; reason: string; alternative: string }[];
+};
+
+/** A staffing action the charge nurse may confirm. Counts of a role in a unit, never a person. */
+export type StaffingAction = {
+  action_id: string;
+  type: "WITHIN_HOSPITAL_REDEPLOYMENT" | "CROSS_HOSPITAL_REASSIGNMENT" | "PATIENT_REDIRECTION";
+  role?: string;
+  count?: number;
+  patient_count?: number;
+  hospital_id?: string;
+  from_hospital?: string;
+  to_hospital?: string;
+  from_area?: string;
+  to_area?: string;
+  corridor_required: boolean;
+  corridor_open?: boolean;
+  corridor_note?: string;
+  reason: string;
+  cost?: string;
+  basis?: string;
+  eligibility?: string;
+  closes_shortfall_by: Record<string, number>;
+  verb: string;
+  requires_confirmation_by: string;
+};
+
+/** A reassignment tonight makes impossible: what, why, and what replaces it. */
+export type StaffingInfeasibility = {
+  action_id: string;
+  request: string;
+  status: string;
+  constraint_type: string;
+  role: string;
+  count: number;
+  from_hospital: string;
+  to_hospital: string;
+  reason: string;
+  expires_at: string;
+  alternative: { action_id: string | null; summary: string; closes_shortfall_by: Record<string, number> };
+};
+
+export type StaffingHospital = {
+  hospital_id: string;
+  staff: Record<string, {
+    scheduled: number; available: number; gap: number;
+    cannot_reach_site: number; local_unavailable_pct: number; optimiser_input: string;
+  }>;
+  demand: {
+    required_nurses: number; required_doctors: number;
+    ed_occupied: number; icu_occupied: number;
+    waiting_by_band: Record<string, number>;
+    derivation: string[]; parameter_source: string;
+  };
+  shortfall: { nurses: number; doctors: number; basis: string; remaining_after_plan: Record<string, number> };
+  movable_surplus: { nurses: number; doctors: number; reserve_held_back: number };
+};
+
+export type StaffingPlan = {
+  generated_at: string;
+  scenario_time: string;
+  policy_version: string;
+  authority: {
+    verb: string; executes: boolean; statement: string;
+    unit_of_recommendation: string; counts_are_role_totals_not_individuals: boolean; not_used_for: string[];
+  };
+  strike_context: {
+    event_type: string;
+    window: { start: string; end: string; timezone: string };
+    in_window_at_scenario_time: boolean;
+    staff_unavailable_pct: number;
+    effective_availability_pct: number;
+    source: string;
+    applies_to: string;
+    does_not_apply_to: string;
+    reachability: Record<string, Record<string, number>>;
+    closed_corridors: { origin: string; destination: string; reachable: number }[];
+  };
+  pressure: {
+    chronic_baseline: { label: string; pct: number; scope: string; used_in_allocation: boolean };
+    tonight_additional: { label: string; pct: number; scope: string; used_in_allocation: boolean };
+    compounded: {
+      method: string; derivation: string[];
+      effective_cover_pct: number; combined_gap_pct: number; naive_sum_not_used: number;
+    };
+    allocation_input: string;
+  };
+  hospitals: StaffingHospital[];
+  plan: {
+    candidates_considered: number;
+    feasible_actions: StaffingAction[];
+    infeasible_actions: StaffingInfeasibility[];
+    residual: { shortfall: Record<string, number>; statement: string; escalate_to: string };
+  };
+  limits: string[];
 };
 
 export type AuditEntry = {
