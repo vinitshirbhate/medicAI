@@ -20,10 +20,14 @@ def reliability_band(reliability: float) -> str:
 def uncertainty_band(reliability: float) -> str:
     """Uncertainty is the inverse of reliability, never a separately proposed quantity.
 
-    Deriving it keeps this line identical to the engine's own `uncertainty.is_low_confidence`, and
-    removes one number the advisory model would otherwise be free to invent.
+    It mirrors `reliability_band` cut for cut. A two-band uncertainty against a three-band
+    reliability made the whole MODERATE range read as "reliability MODERATE / uncertainty LOW",
+    which a clinician reads as a contradiction. `is_low_confidence` remains the .65 crossing, so
+    HIGH uncertainty and low confidence stay the same event.
     """
-    return "HIGH" if reliability < CONFIDENCE_THRESHOLD else "LOW"
+    if reliability >= ESCALATION_CONFIDENCE_THRESHOLD:
+        return "LOW"
+    return "MODERATE" if reliability >= CONFIDENCE_THRESHOLD else "HIGH"
 
 
 def percent(value: float) -> str:

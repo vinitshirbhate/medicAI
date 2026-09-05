@@ -15,6 +15,12 @@ function soLines(target, block, differing = []) {
     const value = document.createElement("dd");
     value.textContent = cell ? cell.display : "—";
     if (!cell) value.classList.add("absent");
+    // A band alone hides how close a value sits to its threshold; show the number that produced it.
+    if (cell && typeof cell.raw === "number" && !cell.display.endsWith("%")) {
+      const raw = document.createElement("small");
+      raw.textContent = cell.raw.toFixed(2);
+      value.append(raw);
+    }
     if (differing.includes(key)) value.classList.add("differs");
     target.append(term, value);
   });

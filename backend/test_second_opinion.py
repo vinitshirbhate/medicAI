@@ -248,13 +248,25 @@ def test_divergence_never_touches_rank_or_reliability() -> None:
 def test_both_columns_band_identically() -> None:
     for value, expected in ((.94, "HIGH"), (.80, "HIGH"), (.71, "MODERATE"), (.65, "MODERATE"), (.64, "LOW")):
         assert reliability_band(value) == expected
-    assert uncertainty_band(.64) == "HIGH" and uncertainty_band(.65) == "LOW"
+
+
+def test_uncertainty_mirrors_reliability_and_never_contradicts_it() -> None:
+    """"Reliability MODERATE / Uncertainty LOW" reads as a contradiction; the bands must move together."""
+    mirror = {"HIGH": "LOW", "MODERATE": "MODERATE", "LOW": "HIGH"}
+    for step in range(0, 101):
+        value = step / 100
+        assert uncertainty_band(value) == mirror[reliability_band(value)]
+    assert uncertainty_band(.67) == "MODERATE"  # the 59%-completeness case that prompted this
+    # HIGH uncertainty and the engine's own low-confidence flag stay the same event.
+    assert (uncertainty_band(.64) == "HIGH") and (.64 < 0.65)
+    assert uncertainty_band(.65) != "HIGH"
 
 
 def test_display_block_is_four_ordered_lines() -> None:
     lines = four_lines(.87, .94, .91)
     assert list(lines) == ["deterioration_risk", "prediction_reliability", "data_completeness", "uncertainty"]
     assert [line["display"] for line in lines.values()] == ["87%", "HIGH", "91%", "LOW"]
+    assert lines["prediction_reliability"]["raw"] == .94  # the number behind the band stays visible
 
 
 def test_engine_uncertainty_line_matches_the_stored_assessment() -> None:
