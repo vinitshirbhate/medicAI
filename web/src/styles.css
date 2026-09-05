@@ -1,0 +1,232 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Sundara Command — design tokens.
+ *
+ * The ground is a warm paper off-white rather than the cool grey a dashboard defaults to: this
+ * console is read for long stretches under ward lighting, and a warm ground is easier to sit with.
+ * Ink is a deep indigo-black, not pure black, so the accent and the text belong to one family.
+ *
+ * Charts do not borrow the brand colour by eye. The protocol-band ramp below is an indigo ordinal
+ * ramp checked with the project palette validator on this surface: monotone light-to-dark, every
+ * adjacent step separated, and the lightest step still clearing the surface at 2.11:1. The four
+ * status colours are fixed and reserved — they mean good / warning / serious / critical and are
+ * never reused for a data series, and never carry meaning without a label beside them.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Paper and ink */
+  --paper: #f7f6f3;
+  --paper-2: #efeeea;
+  --surface: #ffffff;
+  --surface-sunken: #f4f3ef;
+
+  --ink: #0e0f2b;
+  --ink-2: #4a4d68;
+  --ink-3: #7c7f96;
+  --rule: #e4e2dc;
+  --rule-strong: #d2cfc6;
+
+  /* Brand indigo */
+  --accent: #4436e0;
+  --accent-strong: #3325c4;
+  --accent-ink: #2a1f9e;
+  --accent-wash: #eeecfe;
+  --accent-wash-2: #dedafc;
+
+  /* Protocol-band ordinal ramp — band 1 darkest (most urgent) through band 5 lightest. */
+  --band-1: #241a7a;
+  --band-2: #3a2bb5;
+  --band-3: #5546e8;
+  --band-4: #8279f0;
+  --band-5: #b0aaf7;
+
+  /* Reserved status four */
+  --ok: #0ca30c;
+  --ok-ink: #046104;
+  --ok-wash: #e6f5e6;
+  --warn: #fab219;
+  --warn-ink: #7d5300;
+  --warn-wash: #fdf2d9;
+  --serious: #ec835a;
+  --crit: #d03b3b;
+  --crit-ink: #9c2020;
+  --crit-wash: #fbe8e8;
+
+  /* Chart chrome */
+  --series: #5546e8;
+  --series-soft: #dedafc;
+  --grid: #e8e6e0;
+  --axis: #cbc8c0;
+  --mark-muted: #bdbbcf;
+
+  /* shadcn contract */
+  --background: var(--paper);
+  --foreground: var(--ink);
+  --card: var(--surface);
+  --card-foreground: var(--ink);
+  --popover: var(--surface);
+  --popover-foreground: var(--ink);
+  --primary: var(--accent);
+  --primary-foreground: #ffffff;
+  --secondary: var(--paper-2);
+  --secondary-foreground: var(--ink);
+  --muted: var(--surface-sunken);
+  --muted-foreground: var(--ink-3);
+  --accent-color: var(--accent-wash);
+  --accent-foreground: var(--accent-ink);
+  --destructive: var(--crit);
+  --destructive-foreground: #ffffff;
+  --border: var(--rule);
+  --input: var(--rule-strong);
+  --ring: color-mix(in srgb, var(--accent) 45%, transparent);
+  --radius: 0.75rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent-color);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-paper: var(--paper);
+  --color-rule: var(--rule);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-brand: var(--accent);
+  --color-brand-ink: var(--accent-ink);
+  --color-brand-wash: var(--accent-wash);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-crit: var(--crit);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 6px);
+
+  /* Instrument Sans is the voice of the interface: a grotesque with enough character to look
+   * drawn rather than defaulted, and a true tabular figure set for clinical numbers. */
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Menlo, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  body {
+    background-color: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv05" 1, "ss01" 1;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Headings run tight and dark; the interface reads as a document, not a control panel. */
+  h1, h2, h3, h4 {
+    letter-spacing: -0.022em;
+    font-weight: 600;
+  }
+
+  /* Every figure in a column must align, so tabular is the default and prose opts out. */
+  .tnum, table, .figure {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  /* The label voice: small, spaced, uppercase. Used for every field and section label so the
+   * hierarchy is carried by type rather than by another box. */
+  .label-caps {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .rule-t {
+    border-top: 1px solid var(--rule);
+  }
+
+  /* A single hairline ring instead of a drop shadow: flat paper, drawn edges. */
+  .paper-card {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-xl);
+  }
+
+  .focus-ring {
+    outline: none;
+  }
+  .focus-ring:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+/* The hover card for charts, rendered in a fixed layer so it escapes chart overflow. */
+.viz-tip {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  max-width: 17rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--rule-strong);
+  background: var(--surface);
+  box-shadow: 0 12px 28px rgb(14 15 43 / 0.14);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  overflow: visible;
+}
+.chart-tick {
+  font-size: 10.5px;
+  fill: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.chart-label {
+  font-size: 11px;
+  fill: var(--ink-2);
+  font-weight: 500;
+}
+.chart-figure {
+  font-size: 11.5px;
+  fill: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Recede the scrollbar; the console is dense enough already. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-strong) transparent;
+}
