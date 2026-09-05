@@ -43,7 +43,6 @@ export function OverrideDialog({
     try {
       const rank = newRank.trim() ? Number(newRank) : null;
       const response = await api.override(item.patient_id, {
-        actor,
         reason_code: reasonCode,
         reason_text: reasonText,
         new_rank: rank && rank > 0 ? rank : null,

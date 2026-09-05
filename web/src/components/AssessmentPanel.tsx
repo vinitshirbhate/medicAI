@@ -10,8 +10,7 @@ import { ApiError, api } from "@/api/client";
 import type { Observation, PatientDetail, QueueItem } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { CompletenessBreakdown } from "./charts/CompletenessBreakdown";
-import { VitalsTrend } from "./charts/VitalsTrend";
+import { CompletenessBreakdown, RiskComposition, VitalsTrend } from "./charts/PatientCharts";
 import { OverrideDialog } from "./OverrideDialog";
 import {
   BandChip, EmptyState, Notice, ReliabilityTag, ReliabilityTrack, RiskTrack, SectionLabel,
@@ -75,7 +74,7 @@ export function AssessmentPanel({
   const accept = async () => {
     setBusy(true);
     try {
-      const response = await api.accept(item.patient_id, actor);
+      const response = await api.accept(item.patient_id);
       setFlash({ tone: "ok", title: response.message });
       onDecision();
     } catch (cause) {
@@ -171,22 +170,8 @@ export function AssessmentPanel({
         </Notice>
       ) : null}
 
-      <Section label="Why this patient is prioritised">
-        {item.explanation.contributions.length ? (
-          <ul className="space-y-2.5">
-            {item.explanation.contributions.map((contribution) => (
-              <li key={contribution.feature} className="flex items-start justify-between gap-4 text-[13.5px]">
-                <span className="min-w-0">
-                  {contribution.clinical_label}
-                  <span className="mt-0.5 block font-mono text-[11.5px] text-ink-3">{contribution.feature}</span>
-                </span>
-                <span className="shrink-0 font-semibold text-ink-2 tnum">+{contribution.contribution.toFixed(2)}</span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-[13.5px] text-ink-2">{item.explanation.one_line}</p>
-        )}
+      <Section label="How this risk figure was built">
+        <RiskComposition contributions={item.explanation.contributions} total={item.deterioration_risk} />
       </Section>
 
       <Section label="Current observations">

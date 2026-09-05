@@ -21,16 +21,17 @@ export type QueueState = {
   refresh: () => Promise<void>;
 };
 
-export function useQueue(): QueueState {
+export function useQueue(enabled = true): QueueState {
   const [patients, setPatients] = useState<QueueItem[]>([]);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [live, setLive] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const timers = useRef<{ reconnect?: number; poll?: number }>({});
 
   const refresh = useCallback(async () => {
+    if (!enabled) return;
     try {
       const response = await api.queue();
       setPatients(normalizeQueue(response.patients));
@@ -41,9 +42,10 @@ export function useQueue(): QueueState {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
+    if (!enabled) return;
     let disposed = false;
 
     const connect = () => {
@@ -96,7 +98,7 @@ export function useQueue(): QueueState {
       window.clearInterval(timers.current.poll);
       socketRef.current?.close();
     };
-  }, [refresh]);
+  }, [refresh, enabled]);
 
   return { patients, updatedAt, live, loading, error, refresh };
 }
