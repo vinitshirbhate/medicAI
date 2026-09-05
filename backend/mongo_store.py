@@ -132,6 +132,33 @@ def append_observation(patient_id: str, observation: dict[str, Any]) -> bool:
         return False
 
 
+def upsert_user(user: dict[str, Any]) -> bool:
+    """Mirror an account into the record store. Sign-in still reads the local copy, so a cluster
+    that is unreachable delays nothing; this keeps the roster durable alongside the patients."""
+    db = database()
+    if db is None:
+        return False
+    try:
+        db.users.create_index("email", unique=True)
+        db.users.update_one({"user_id": user["user_id"]}, {"$set": user}, upsert=True)
+        return True
+    except Exception as error:
+        _fail(f"user write failed: {type(error).__name__}")
+        return False
+
+
+def delete_user(user_id: str) -> bool:
+    db = database()
+    if db is None:
+        return False
+    try:
+        db.users.delete_one({"user_id": user_id})
+        return True
+    except Exception as error:
+        _fail(f"user delete failed: {type(error).__name__}")
+        return False
+
+
 def load_all() -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
     """Every stored patient with its observations, ordered oldest first."""
     db = database()

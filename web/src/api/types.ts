@@ -222,6 +222,22 @@ export type SystemStatus = {
   local_store: Record<string, number>;
 };
 
+export type Role = "DOCTOR" | "NURSE";
+
+export type AuthUser = {
+  user_id: string;
+  email: string;
+  name: string;
+  role: Role;
+  title: string;
+  created_at: string;
+};
+
+export type Session = { token: string; expires_at: string; user: AuthUser };
+
+/** Seeded sign-ins the login screen offers. Only ever populated for a synthetic demonstration. */
+export type DemoAccount = { email: string; password: string; name: string; role: Role; title: string };
+
 export type OverrideReason =
   | "NEW_CLINICAL_INFORMATION"
   | "BEDSIDE_ASSESSMENT_DIFFERS"

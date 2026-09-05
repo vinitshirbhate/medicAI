@@ -7,11 +7,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import {
-  Activity, BedDouble, LayoutDashboard, RefreshCw, ScrollText,
-  Search, Settings as SettingsIcon, ShieldCheck, Users,
+  Activity, BedDouble, LayoutDashboard, LogOut, RefreshCw, ScrollText,
+  Search, Settings as SettingsIcon, ShieldCheck, UserCog, Users,
 } from "lucide-react";
+import type { Role } from "@/api/types";
+import { useAuth } from "@/auth/AuthContext";
 import { Input } from "@/components/ui/input";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
+  DropdownMenuSeparator, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { LoginPage } from "./pages/LoginPage";
+import { TeamPage } from "./pages/TeamPage";
 import { useQueue } from "./hooks/useQueue";
 import { AnalyticsPage } from "./pages/AnalyticsPage";
 import { AuditPage } from "./pages/AuditPage";
@@ -20,13 +28,16 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { PatientsPage } from "./pages/PatientsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
-const NAV = [
+/** An omitted `roles` means every signed-in user. The server enforces the same gates regardless:
+ *  hiding a link is presentation, not access control. */
+const NAV: { to: string; label: string; icon: typeof Users; roles?: Role[] }[] = [
   { to: "/", label: "Triage queue", icon: LayoutDashboard },
   { to: "/patients", label: "Patients", icon: Users },
   { to: "/beds", label: "Beds & network", icon: BedDouble },
   { to: "/analytics", label: "Analytics", icon: Activity },
   { to: "/audit", label: "Audit log", icon: ScrollText },
-  { to: "/settings", label: "Settings", icon: SettingsIcon },
+  { to: "/team", label: "Team & roles", icon: UserCog, roles: ["DOCTOR"] },
+  { to: "/settings", label: "Settings", icon: SettingsIcon, roles: ["DOCTOR"] },
 ];
 
 const PAGES: Record<string, { eyebrow: string; title: string; lede: string }> = {
@@ -55,6 +66,11 @@ const PAGES: Record<string, { eyebrow: string; title: string; lede: string }> = 
     title: "Decision audit log",
     lede: "Every assessment and every human decision, hash-chained in the order they happened.",
   },
+  "/team": {
+    eyebrow: "Administration",
+    title: "Team & roles",
+    lede: "Who can sign in, and what each role may do. Creating or removing an account is audited.",
+  },
   "/settings": {
     eyebrow: "Configuration",
     title: "Console settings",
@@ -62,14 +78,16 @@ const PAGES: Record<string, { eyebrow: string; title: string; lede: string }> = 
   },
 };
 
-const ACTOR_KEY = "sundara.actor";
+function initials(name: string): string {
+  return name.replace(/[^A-Za-z ]/g, "").split(" ").filter(Boolean).slice(-2).map((part) => part[0]).join("");
+}
 
 export default function App() {
-  const queue = useQueue();
+  const { user, ready, signOut, can } = useAuth();
+  const queue = useQueue(Boolean(user));
   const location = useLocation();
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
-  const [actor] = useState(() => localStorage.getItem(ACTOR_KEY) || "Dr. A. Rao");
 
   const page = PAGES[location.pathname] ?? PAGES["/"];
   const urgent = useMemo(() => queue.patients.filter((item) => item.protocol_band <= 2).length, [queue.patients]);
@@ -83,6 +101,16 @@ export default function App() {
     );
     if (hit && location.pathname !== "/") navigate(`/?patient=${encodeURIComponent(hit.patient_id)}`);
   }, [search, queue.patients, location.pathname, navigate]);
+
+  // Nothing renders until the stored token has been checked against the server, so the console
+  // never flashes a queue at someone whose session has already expired.
+  if (!ready) {
+    return <div className="grid min-h-screen place-items-center text-[13px] text-ink-3">Checking your session…</div>;
+  }
+  if (!user) return <LoginPage />;
+
+  const actor = user.name;
+  const visibleNav = NAV.filter((entry) => !entry.roles || can(...entry.roles));
 
   return (
     <div className="min-h-screen lg:grid lg:grid-cols-[248px_minmax(0,1fr)]">
@@ -101,7 +129,7 @@ export default function App() {
         </div>
 
         <nav className="flex flex-col gap-0.5">
-          {NAV.map((entry) => (
+          {visibleNav.map((entry) => (
             <NavLink key={entry.to} to={entry.to} end={entry.to === "/"}
               className={({ isActive }) =>
                 cn(
@@ -160,13 +188,34 @@ export default function App() {
               <span className="h-1.5 w-1.5 rounded-full" style={{ background: queue.live ? "var(--ok)" : "var(--warn)" }} />
               {queue.live ? "Live" : "Paused"}
             </span>
-            <span className="inline-flex items-center gap-2 rounded-full py-1.5 pr-1 pl-3 text-[12.5px] font-medium">
-              {actor}
-              <span className="grid h-6 w-6 place-items-center rounded-full text-[11px] font-semibold"
-                style={{ background: "var(--accent-wash)", color: "var(--accent-ink)" }}>
-                {actor.replace(/[^A-Za-z ]/g, "").split(" ").filter(Boolean).slice(-2).map((part) => part[0]).join("")}
-              </span>
-            </span>
+            <DropdownMenu>
+              <DropdownMenuTrigger className="focus-ring inline-flex items-center gap-2 rounded-full py-1.5 pr-1 pl-3 text-[12.5px] font-medium transition-colors hover:bg-[--surface-sunken]">
+                {user.name}
+                <span className="grid h-6 w-6 place-items-center rounded-full text-[11px] font-semibold"
+                  style={{ background: "var(--accent-wash)", color: "var(--accent-ink)" }}>
+                  {initials(user.name)}
+                </span>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-64">
+                <DropdownMenuLabel className="font-normal">
+                  <div className="text-[13px] font-semibold">{user.name}</div>
+                  <div className="mt-0.5 font-mono text-[11.5px] text-ink-3">{user.email}</div>
+                  <div className="mt-2 inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                    style={{ background: "var(--accent-wash)", color: "var(--accent-ink)" }}>
+                    {user.role === "DOCTOR" ? "Doctor · full access" : "Nurse · clinical access"}
+                  </div>
+                  <p className="mt-2 text-[11.5px] leading-relaxed text-ink-3">
+                    {user.role === "DOCTOR"
+                      ? "You can manage accounts and reset the demonstration data."
+                      : "Account management and the demonstration reset need the doctor role."}
+                  </p>
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={signOut}>
+                  <LogOut /> Sign out
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </header>
 
@@ -183,7 +232,10 @@ export default function App() {
             <Route path="/beds" element={<BedsPage queue={queue} />} />
             <Route path="/analytics" element={<AnalyticsPage queue={queue} />} />
             <Route path="/audit" element={<AuditPage />} />
-            <Route path="/settings" element={<SettingsPage onReset={() => void queue.refresh()} />} />
+            {/* Role-gated routes are absent, not merely hidden: a typed URL must not render a page
+                whose every request the server would refuse. */}
+            {can("DOCTOR") ? <Route path="/team" element={<TeamPage />} /> : null}
+            {can("DOCTOR") ? <Route path="/settings" element={<SettingsPage onReset={() => void queue.refresh()} />} /> : null}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>

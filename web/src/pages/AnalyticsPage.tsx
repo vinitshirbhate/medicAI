@@ -6,10 +6,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "@/api/client";
 import type { Observation } from "@/api/types";
-import { BandDistribution } from "@/components/charts/BandDistribution";
-import { RiskByPatient } from "@/components/charts/RiskByPatient";
-import { VitalsTrend } from "@/components/charts/VitalsTrend";
-import { WaitVersusRisk } from "@/components/charts/WaitVersusRisk";
+import { BandDistribution, RiskByPatient, WaitVersusRisk } from "@/components/charts/QueueCharts";
+import { VitalsTrend } from "@/components/charts/PatientCharts";
 import {
   EmptyState, SectionLabel, StatTile, minutesLabel, percent, reliabilityBand,
 } from "@/components/clinical";

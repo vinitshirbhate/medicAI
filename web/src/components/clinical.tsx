@@ -49,6 +49,12 @@ export function dateTime(iso: string): string {
     : parsed.toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+/** Dense table columns get the time without a zone name, which otherwise wraps and breaks the row. */
+export function shortTime(iso: string): string {
+  const parsed = new Date(iso);
+  return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 export const titleCase = (value: string) =>
   value.replace(/_/g, " ").toLowerCase().replace(/(^|\s)\w/g, (match) => match.toUpperCase());
 

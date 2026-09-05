@@ -7,10 +7,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+import auth
 from banding import CONFIDENCE_THRESHOLD, ESCALATION_CONFIDENCE_THRESHOLD, uncertainty_band
 from case_facts import BASELINE_ICU_OCCUPANCY_PCT, FIRE_CASUALTIES, STRIKE_END, STRIKE_START, STRIKE_STAFF_UNAVAILABLE_PCT
 from intake_extraction import extract_intake
@@ -29,6 +30,8 @@ def now() -> str: return datetime.now(UTC).isoformat()
 def dump(v: Any) -> str: return json.dumps(v, sort_keys=True, separators=(",", ":"), default=str)
 def conn() -> sqlite3.Connection:
     c = sqlite3.connect(DB); c.row_factory = sqlite3.Row; return c
+
+current_user, require_role = auth.build_dependencies(conn)
 
 class Value(BaseModel):
     value: float | None = None
@@ -87,8 +90,20 @@ class SecondOpinionRequest(BaseModel):
     actor: str = "VOICE_CONSOLE"
     force_refresh: bool = False
 
+class Credentials(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    password: str = Field(min_length=1, max_length=200)
+
+class NewUser(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    name: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=8, max_length=200)
+    role: Literal["DOCTOR", "NURSE"] = "NURSE"
+    title: str = Field(default="", max_length=120)
+
 class Decision(BaseModel):
-    actor: str = Field(min_length=1)
+    # No actor field: the signed-in user is taken from the token, so a client cannot record a
+    # decision under someone else's name.
     reason_code: Literal["NEW_CLINICAL_INFORMATION", "BEDSIDE_ASSESSMENT_DIFFERS", "RESOURCE_CONSTRAINT", "DETERIORATION_OBSERVED", "OTHER"] | None = None
     reason_text: str = ""
     new_rank: int | None = Field(default=None, ge=1)
@@ -268,6 +283,8 @@ def network_resources() -> dict[str, Any]:
 def setup() -> None:
     with conn() as c:
         c.executescript("""CREATE TABLE IF NOT EXISTS patients(patient_id TEXT PRIMARY KEY,payload TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS vitals(id INTEGER PRIMARY KEY AUTOINCREMENT,patient_id TEXT NOT NULL,payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS assessments(patient_id TEXT PRIMARY KEY,payload TEXT NOT NULL,assessed_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,entry TEXT NOT NULL,prev_hash TEXT NOT NULL,hash TEXT NOT NULL); CREATE TABLE IF NOT EXISTS second_opinions(fingerprint TEXT PRIMARY KEY,patient_id TEXT NOT NULL,model_id TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL);""")
+    auth.create_tables(conn)
+    auth.seed_accounts(conn, mirror=mongo_store.upsert_user)
     seed()
 
 @asynccontextmanager
@@ -284,7 +301,7 @@ def health() -> dict[str,Any]:
             "record_store":"mongodb" if store["connected"] else "sqlite-local",
             "mongodb":{"connected":store["connected"],"database":store["database"]}}
 @app.get("/api/v1/system/status")
-def system_status(refresh: bool = False) -> dict[str,Any]:
+def system_status(refresh: bool = False, _: dict[str,Any] = Depends(current_user)) -> dict[str,Any]:
     """Backend and record-store readiness for the console Settings page.
 
     `refresh=true` bypasses the record store's reconnect backoff, which is what the operator means
@@ -336,35 +353,72 @@ async def transcribe_voice_segment(audio: UploadFile = File(...)) -> dict[str,st
     except Exception as error:
         raise HTTPException(503, "Local Whisper segment transcription unavailable.") from error
     return {"transcript": transcript}
+@app.post("/api/v1/auth/login")
+def login(payload: Credentials) -> dict[str,Any]:
+    user = auth.find_by_email(conn, payload.email)
+    # One message for a wrong address and a wrong password: distinguishing them tells an attacker
+    # which addresses are real.
+    if not user or not auth.verify_password(payload.password, user["password_hash"]):
+        raise HTTPException(401, "Email or password is incorrect.")
+    token, expires_at = auth.issue_token(user)
+    audit("SIGN_IN","HUMAN",user["name"],None,{"user_id":user["user_id"],"role":user["role"]})
+    return {"token":token,"expires_at":expires_at,"user":auth.public(user)}
+@app.get("/api/v1/auth/me")
+def whoami(user: dict[str,Any] = Depends(current_user)) -> dict[str,Any]: return user
+@app.get("/api/v1/auth/demo-accounts")
+def demo_accounts() -> dict[str,Any]:
+    """The seeded sign-ins the login screen offers as one-click buttons.
+
+    These are fixed credentials for a synthetic demonstration, which is the only reason it is
+    acceptable to serve them. `SUNDARA_DEMO_LOGINS=0` turns the affordance off entirely.
+    """
+    return {"enabled":auth.DEMO_LOGINS_ENABLED,"accounts":auth.demo_accounts()}
+@app.get("/api/v1/users")
+def get_users(_: dict[str,Any] = Depends(require_role("DOCTOR"))) -> dict[str,Any]:
+    return {"users":auth.list_users(conn)}
+@app.post("/api/v1/users",status_code=201)
+def add_user(payload: NewUser, actor: dict[str,Any] = Depends(require_role("DOCTOR"))) -> dict[str,Any]:
+    created = auth.create_user(conn, email=payload.email, name=payload.name, password=payload.password,
+                               role=payload.role, title=payload.title, mirror=mongo_store.upsert_user)
+    audit("USER_CREATED","HUMAN",actor["name"],None,{"user_id":created["user_id"],"role":created["role"],"email":created["email"]})
+    return created
+@app.delete("/api/v1/users/{user_id}")
+def remove_user(user_id: str, actor: dict[str,Any] = Depends(require_role("DOCTOR"))) -> dict[str,Any]:
+    if user_id == actor["user_id"]: raise HTTPException(409, "You cannot remove your own account.")
+    removed = auth.delete_user(conn, user_id); mongo_store.delete_user(user_id)
+    audit("USER_REMOVED","HUMAN",actor["name"],None,{"user_id":removed["user_id"],"role":removed["role"],"email":removed["email"]})
+    return removed
 @app.get("/api/v1/patients")
-def get_patients() -> dict[str,Any]:
+def get_patients(_: dict[str,Any] = Depends(current_user)) -> dict[str,Any]:
     """Every registered patient with its latest observation. Demographics the queue does not carry."""
     patients = sorted(list_patients(), key=lambda p: p["arrival_time"], reverse=True)
     return {"count":len(patients),"source":"mongodb" if mongo_store.is_available() else "sqlite-local",
             "patients":[{**p,"observations":len(vitals_for(p["patient_id"])),"latest_observation":(vitals_for(p["patient_id"]) or [None])[-1]} for p in patients]}
 @app.get("/api/v1/patients/{patient_id}")
-def get_patient(patient_id:str) -> dict[str,Any]:
+def get_patient(patient_id:str, _: dict[str,Any] = Depends(current_user)) -> dict[str,Any]:
     """One patient with its full observation series, for the assessment page's trend view."""
     with conn() as c: row=c.execute("SELECT payload FROM patients WHERE patient_id=?",(patient_id,)).fetchone()
     if not row: raise HTTPException(404,"patient not found")
     return {**json.loads(row["payload"]),"observations":vitals_for(patient_id)}
 @app.get("/api/v1/queue")
-def get_queue() -> dict[str,Any]: return {"updated_at":now(),"ranking_policy":"protocol band, then risk, time sensitivity, wait equity; reliability gates only","patients":queue()}
+def get_queue(_: dict[str,Any] = Depends(current_user)) -> dict[str,Any]: return {"updated_at":now(),"ranking_policy":"protocol band, then risk, time sensitivity, wait equity; reliability gates only","patients":queue()}
 @app.post("/api/v1/patients",status_code=201)
-async def create_patient(payload: Patient) -> dict[str,Any]:
+async def create_patient(payload: Patient, actor: dict[str,Any] = Depends(current_user)) -> dict[str,Any]:
     with conn() as c:
         if c.execute("SELECT 1 FROM patients WHERE patient_id=?",(payload.patient_id,)).fetchone(): raise HTTPException(409,"patient_id already exists")
         patient = payload.model_dump(mode="json",exclude={"vitals"}); c.execute("INSERT INTO patients VALUES(?,?,?)",(payload.patient_id,dump(patient),now())); c.execute("INSERT INTO vitals(patient_id,payload) VALUES(?,?)",(payload.patient_id,dump(payload.vitals.model_dump(mode="json"))))
     observation=payload.vitals.model_dump(mode="json")
     mongo_store.upsert_patient(patient); mongo_store.append_observation(payload.patient_id,observation)
+    audit("PATIENT_REGISTERED","HUMAN",actor["name"],payload.patient_id,{"role":actor["role"],"pathway":patient["pathway"],"protocol_band":patient["protocol_band"]})
     assessment=save_assessment(patient); await hub.broadcast(); return assessment
 @app.post("/api/v1/patients/{patient_id}/vitals")
-async def add_vitals(patient_id:str,payload:Vitals)->dict[str,Any]:
+async def add_vitals(patient_id:str,payload:Vitals,actor: dict[str,Any] = Depends(current_user))->dict[str,Any]:
     with conn() as c:
         row=c.execute("SELECT payload FROM patients WHERE patient_id=?",(patient_id,)).fetchone()
         if not row: raise HTTPException(404,"patient not found")
         c.execute("INSERT INTO vitals(patient_id,payload) VALUES(?,?)",(patient_id,dump(payload.model_dump(mode="json"))))
     mongo_store.append_observation(patient_id,payload.model_dump(mode="json"))
+    audit("OBSERVATION_RECORDED","HUMAN",actor["name"],patient_id,{"role":actor["role"],"source":payload.source})
     assessment=save_assessment(json.loads(row["payload"])); await hub.broadcast(); return assessment
 @app.post("/api/v1/patients/{patient_id}/second-opinion")
 async def second_opinion(patient_id:str,payload:SecondOpinionRequest)->dict[str,Any]:
@@ -390,25 +444,25 @@ async def second_opinion(patient_id:str,payload:SecondOpinionRequest)->dict[str,
         "affected_rank":False,"rejection_reasons":(result.get("degraded") or {}).get("detail",[])})
     return result
 @app.get("/api/v1/patients/{patient_id}/trends")
-def patient_trends(patient_id:str)->dict[str,Any]:
+def patient_trends(patient_id:str,_: dict[str,Any] = Depends(current_user))->dict[str,Any]:
     """Factual trend features from the time-series service, or locally derived and labelled as such."""
     with conn() as c:
         if not c.execute("SELECT 1 FROM patients WHERE patient_id=?",(patient_id,)).fetchone(): raise HTTPException(404,"patient not found")
     return features_for(patient_id,vitals_for(patient_id))
 @app.get("/api/v1/patients/{patient_id}/assessment")
-def assessment(patient_id:str)->dict[str,Any]:
+def assessment(patient_id:str,_: dict[str,Any] = Depends(current_user))->dict[str,Any]:
     with conn() as c: row=c.execute("SELECT payload FROM assessments WHERE patient_id=?",(patient_id,)).fetchone()
     if not row: raise HTTPException(404,"assessment not found")
     return json.loads(row["payload"])
 @app.post("/api/v1/patients/{patient_id}/accept")
-async def accept(patient_id:str,payload:Decision)->dict[str,str]:
-    audit("ACCEPT","HUMAN",payload.actor,patient_id,{"recommendation_accepted":True}); await hub.broadcast(); return {"status":"accepted","message":"Recommendation accepted."}
+async def accept(patient_id:str,payload:Decision,actor: dict[str,Any] = Depends(current_user))->dict[str,str]:
+    audit("ACCEPT","HUMAN",actor["name"],patient_id,{"recommendation_accepted":True,"role":actor["role"]}); await hub.broadcast(); return {"status":"accepted","message":"Recommendation accepted."}
 @app.post("/api/v1/patients/{patient_id}/override")
-async def override(patient_id:str,payload:Decision)->dict[str,Any]:
+async def override(patient_id:str,payload:Decision,actor: dict[str,Any] = Depends(current_user))->dict[str,Any]:
     if not payload.reason_code: raise HTTPException(422,"reason_code is required for an override")
-    due=(datetime.now(UTC)+timedelta(minutes=10)).isoformat(); audit("OVERRIDE","HUMAN",payload.actor,patient_id,{"reason_code":payload.reason_code,"reason_text":payload.reason_text,"new_rank":payload.new_rank,"reassessment_due":due}); await hub.broadcast(); return {"status":"override_accepted","message":"Override accepted. Reassessment recommended in 10 minutes.","reassessment_due":due}
+    due=(datetime.now(UTC)+timedelta(minutes=10)).isoformat(); audit("OVERRIDE","HUMAN",actor["name"],patient_id,{"reason_code":payload.reason_code,"reason_text":payload.reason_text,"new_rank":payload.new_rank,"reassessment_due":due,"role":actor["role"]}); await hub.broadcast(); return {"status":"override_accepted","message":"Override accepted. Reassessment recommended in 10 minutes.","reassessment_due":due}
 @app.get("/api/v1/resources")
-def resource_state()->dict[str,Any]: return network_resources()
+def resource_state(_: dict[str,Any] = Depends(current_user))->dict[str,Any]: return network_resources()
 @app.get("/api/v1/resources/staffing-plan")
 def staffing_recommendation(at:datetime|None=None)->dict[str,Any]:
     """A proposed staffing plan that names what tonight makes impossible.
@@ -420,25 +474,31 @@ def staffing_recommendation(at:datetime|None=None)->dict[str,Any]:
     decision worth auditing is a human accepting an action, not the system offering one.
     """
     return staffing_plan(network_hospitals(), queue(), at=at)
-@app.get("/api/v1/audit")
-def audit_entries()->list[dict[str,Any]]:
+def _all_audit_entries()->list[dict[str,Any]]:
     with conn() as c: rows=c.execute("SELECT seq,entry,hash FROM audit ORDER BY seq").fetchall()
     return [{**json.loads(r["entry"]),"seq":r["seq"],"hash":r["hash"]} for r in rows]
+@app.get("/api/v1/audit")
+def audit_entries(_: dict[str,Any] = Depends(current_user))->list[dict[str,Any]]:
+    return _all_audit_entries()
 @app.get("/api/v1/audit/verify")
-def verify_audit()->dict[str,Any]:
+def verify_audit(_: dict[str,Any] = Depends(current_user))->dict[str,Any]:
     previous="GENESIS"
-    for item in audit_entries():
+    for item in _all_audit_entries():
         claimed=item.pop("hash"); item.pop("seq")
         if item["prev_hash"] != previous or hashlib.sha256((previous+dump(item)).encode()).hexdigest()!=claimed: return {"valid":False,"failed_at":item.get("patient_id")}
         previous=claimed
     return {"valid":True,"head_hash":previous}
 @app.post("/api/v1/demo/reset")
-async def reset_demo()->dict[str,Any]:
+async def reset_demo(actor: dict[str,Any] = Depends(require_role("DOCTOR")))->dict[str,Any]:
     with conn() as c: c.executescript("DELETE FROM audit; DELETE FROM assessments; DELETE FROM vitals; DELETE FROM patients; DELETE FROM second_opinions;")
     mongo_store.seed_mock_patients(replace=True)
-    seed(); await hub.broadcast(); return {"status":"reset","patients":len(queue())}
+    auth.create_tables(conn); auth.seed_accounts(conn, mirror=mongo_store.upsert_user)
+    seed()
+    audit("DEMO_RESET","HUMAN",actor["name"],None,{"role":actor["role"]}); await hub.broadcast(); return {"status":"reset","patients":len(queue())}
 @app.websocket("/ws/queue")
-async def queue_socket(socket:WebSocket)->None:
+async def queue_socket(socket:WebSocket, token: str = "")->None:
+    if not auth.read_token(token):
+        await socket.close(code=4401, reason="Sign in to receive queue updates."); return
     await socket.accept(); hub.clients.add(socket); await socket.send_json({"type":"queue.updated","at":now(),"queue":queue()})
     try:
         while True: await socket.receive_text()

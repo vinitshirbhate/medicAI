@@ -1,11 +1,28 @@
 /** The single place that knows the backend's address and error conventions. */
 import type {
-  Assessment, AuditEntry, AuditVerification, Observation, PatientDetail, PatientSummary,
-  QueueResponse, ResourceState, StaffingPlan, SystemStatus,
+  Assessment, AuditEntry, AuditVerification, AuthUser, DemoAccount, Observation, PatientDetail,
+  PatientSummary, QueueResponse, ResourceState, StaffingPlan, Session, SystemStatus,
 } from "./types";
 
 const FALLBACK_BASE = "http://127.0.0.1:8000";
 const OVERRIDE_KEY = "sundara.api_base_url";
+const TOKEN_KEY = "sundara.token";
+
+export function readToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null; // A browser with site data blocked simply has no session.
+  }
+}
+
+export function storeToken(token: string): void {
+  try { localStorage.setItem(TOKEN_KEY, token); } catch { /* session lasts this tab only */ }
+}
+
+export function clearToken(): void {
+  try { localStorage.removeItem(TOKEN_KEY); } catch { /* nothing to clear */ }
+}
 
 /** Settings can point the console at another backend without a rebuild. */
 export function apiBaseUrl(): string {
@@ -26,10 +43,15 @@ export class ApiError extends Error {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
+  const token = readToken();
   try {
     response = await fetch(`${apiBaseUrl()}${path}`, {
       ...init,
-      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(init?.headers ?? {}),
+      },
     });
   } catch {
     // A dead backend is an operational state, not a stack trace for the clinician.
@@ -37,6 +59,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!response.ok) {
     const body = await response.json().catch(() => null);
+    // An expired or revoked token must not leave the console half-signed-in.
+    if (response.status === 401 && path !== "/api/v1/auth/login") clearToken();
     throw new ApiError(readDetail(body) ?? `${response.status} ${response.statusText}`, response.status, body);
   }
   return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
@@ -59,6 +83,15 @@ function readDetail(body: unknown): string | null {
 }
 
 export const api = {
+  login: (email: string, password: string) =>
+    request<Session>("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  me: () => request<AuthUser>("/api/v1/auth/me"),
+  demoAccounts: () => request<{ enabled: boolean; accounts: DemoAccount[] }>("/api/v1/auth/demo-accounts"),
+  users: () => request<{ users: AuthUser[] }>("/api/v1/users"),
+  createUser: (body: { email: string; name: string; password: string; role: string; title: string }) =>
+    request<AuthUser>("/api/v1/users", { method: "POST", body: JSON.stringify(body) }),
+  deleteUser: (userId: string) =>
+    request<AuthUser>(`/api/v1/users/${encodeURIComponent(userId)}`, { method: "DELETE" }),
   health: () => request<{ status: string; record_store: string; mongodb: { connected: boolean } }>("/health"),
   // `refresh` bypasses the backend's record-store reconnect backoff; use it only for an explicit check.
   systemStatus: (refresh = false) => request<SystemStatus>(`/api/v1/system/status${refresh ? "?refresh=true" : ""}`),
@@ -69,12 +102,12 @@ export const api = {
   createPatient: (body: unknown) => request<Assessment>("/api/v1/patients", { method: "POST", body: JSON.stringify(body) }),
   addVitals: (id: string, body: Partial<Observation>) =>
     request<Assessment>(`/api/v1/patients/${encodeURIComponent(id)}/vitals`, { method: "POST", body: JSON.stringify(body) }),
-  accept: (id: string, actor: string) =>
+  accept: (id: string) =>
     request<{ status: string; message: string }>(`/api/v1/patients/${encodeURIComponent(id)}/accept`, {
       method: "POST",
-      body: JSON.stringify({ actor }),
+      body: JSON.stringify({}),
     }),
-  override: (id: string, body: { actor: string; reason_code: string; reason_text: string; new_rank?: number | null }) =>
+  override: (id: string, body: { reason_code: string; reason_text: string; new_rank?: number | null }) =>
     request<{ status: string; message: string; reassessment_due: string }>(
       `/api/v1/patients/${encodeURIComponent(id)}/override`,
       { method: "POST", body: JSON.stringify(body) },
@@ -89,7 +122,9 @@ export const api = {
 };
 
 /** The queue socket lives beside the REST base, with the matching ws/wss scheme. */
+/** The socket authenticates too; a browser cannot set headers on it, so the token is a parameter. */
 export function queueSocketUrl(): string {
-  const base = apiBaseUrl();
-  return `${base.replace(/^http/, "ws")}/ws/queue`;
+  const base = apiBaseUrl().replace(/^http/, "ws");
+  const token = readToken();
+  return `${base}/ws/queue${token ? `?token=${encodeURIComponent(token)}` : ""}`;
 }

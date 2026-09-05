@@ -9,7 +9,7 @@ import { RefreshCw, Search } from "lucide-react";
 import { api } from "@/api/client";
 import type { PatientSummary } from "@/api/types";
 import {
-  BandChip, EmptyState, Notice, SectionLabel, StatTile, clockTime, minutesLabel, percent, titleCase,
+  BandChip, EmptyState, Notice, SectionLabel, StatTile, minutesLabel, percent, shortTime, titleCase,
 } from "@/components/clinical";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -108,7 +108,7 @@ export function PatientsPage({ queue }: { queue: QueueState }) {
                   <TableHead>Age / sex</TableHead>
                   <TableHead>Pathway</TableHead>
                   <TableHead>Chief complaint</TableHead>
-                  <TableHead>Arrived</TableHead>
+                  <TableHead className="whitespace-nowrap">Arrived</TableHead>
                   <TableHead>Latest observation</TableHead>
                   <TableHead className="text-right">Assessment</TableHead>
                   <TableHead />
@@ -141,7 +141,7 @@ export function PatientsPage({ queue }: { queue: QueueState }) {
                         {patient.chief_complaint || <span className="text-ink-3">Not recorded</span>}
                       </TableCell>
                       <TableCell>
-                        <span className="tnum">{clockTime(patient.arrival_time)}</span>
+                        <span className="whitespace-nowrap tnum">{shortTime(patient.arrival_time)}</span>
                         <div className="text-[12px] text-ink-3">{titleCase(patient.arrival_mode)}</div>
                       </TableCell>
                       <TableCell>
@@ -149,7 +149,7 @@ export function PatientsPage({ queue }: { queue: QueueState }) {
                           <>
                             <span className="tnum">HR {latest.heart_rate.value ?? "—"} · SpO₂ {latest.spo2.value ?? "—"}</span>
                             <div className="text-[12px] text-ink-3 tnum">
-                              {patient.observations} observation{patient.observations === 1 ? "" : "s"} · {clockTime(latest.observed_at)}
+                              {patient.observations} obs · {shortTime(latest.observed_at)}
                             </div>
                           </>
                         ) : (
